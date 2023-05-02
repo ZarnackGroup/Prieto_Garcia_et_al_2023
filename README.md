@@ -13,4 +13,4 @@ R-Scripts and Rmarkdown reports have to be executed in the following order:
 - 5_adjust_IDs_for_FAS_analysis.R
 - 4_FASscore_analysis.Rmd
 
-The rendered HTML-Reports can be accessed at mchicken1988.github.io/Prieto_Garcia_et_al_2023/
+The rendered HTML-Reports can be accessed at https://mchicken1988.github.io/Prieto_Garcia_et_al_2023/
