@@ -1,0 +1,37 @@
+---
+title: "Prieto-Garcia et al. 2023"
+author:
+- name: Mario Keller
+  affiliation: Faculty of Biological Sciences, Goethe University Frankfurt
+output:
+    BiocStyle::html_document:
+      toc: TRUE
+      toc_float: TRUE
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+This GitHub Page provides the rendered HTML-Reports comprising
+the figures and results of Prieto-Garcia et al. 2023 published in XXX.
+
+# Effect of USP39 knockdown on splicing
+
+[1_effect_of_USP39_KD_on_splicing.html](1_effect_of_USP39_KD_on_splicing.html) 
+includes the splicing analysis and characterization of A5SS events.
+
+# Generation of peptide and adjusted SWISSPROT sequences
+
+[2_generate_peptide_and_adjusted_SWISSPROT_sequences.html](2_generate_peptide_and_adjusted_SWISSPROT_sequences.html) 
+provides the code for the generation of peptide sequences from A5SS events and
+their incorporation into SWISS-PROT sequences.
+
+# RNA splicing maps and A5SS event features
+
+[3_RNAmaps_and_features.html](3_RNAmaps_and_features.html) includes the description
+of the RNA splicing maps and the analysis of A5SS event features.
+
+# FAS score analysis
+
+[4_FASscore_analysis.html](4_FASscore_analysis.html) includes the analysis
+of domain architecture changes due to A5SS events based on computed FAS scores.
