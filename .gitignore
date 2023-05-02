@@ -47,3 +47,11 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+
+# custom
+data/
+rds_files/
+xlsx_files/
+fasta_files/
+tsv_files/

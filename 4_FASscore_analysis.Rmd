@@ -1,0 +1,339 @@
+---
+title: "FAS score analysis"
+author:
+- name: Mario Keller
+  affiliation: Faculty of Biological Sciences, Goethe University Frankfurt
+output:
+  BiocStyle::html_document:
+      toc: TRUE
+      toc_float: TRUE
+      code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE,
+                      crop=NULL, results = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(ggbeeswarm)
+library(ggsci)
+library(Biostrings)
+library(plotly)
+library(PhyloProfile)
+```
+
+```{r}
+myTheme <- theme_bw() +
+    theme(axis.text = element_text(size = 14, colour="black"),
+          axis.title = element_text(size=16, colour="black"),
+          axis.ticks=element_line(color="black"),
+          axis.ticks.length=unit(.15, "cm"),
+          panel.border=element_rect(color="black", fill = NA),
+          panel.background = element_blank(),
+          plot.background = element_blank(),
+          legend.text = element_text(size=12),
+          legend.position = "none")
+```
+
+# Background 
+
+Changes in domain composition had been analyzed using the FAS algorithm, which
+results in FAS scores between pairs of protein sequences. The results are 
+analyzed in this report.
+
+# Data
+
+```{r input}
+FASscores <- read.table("data/FAS/regulated_isoforms_adjusted_IDs_no_redundant_IDs.phyloprofile",
+                        header=T)
+
+sequenceInformation <- readxl::read_xlsx("xlsx_files/summary_A5SS_adjusted_Swissprot_sequences.xlsx")
+
+classificationDf <- readRDS("rds_files/classificationDF.rds")
+
+seqs <- readAAStringSet("fasta_files/regulated_isoforms_adjusted_IDs_no_redundant_IDs.fasta")
+
+domainFileFWD <- "data/FAS/regulated_isoforms_adjusted_IDs_no_redundant_IDs_forward.domains"
+domainFileREV <- "data/FAS/regulated_isoforms_adjusted_IDs_no_redundant_IDs_reverse.domains"
+
+
+domainDfFWD <- parseDomainInput(seed = NULL, domainFileFWD, "file")
+domainDfREV <- parseDomainInput(seed = NULL, domainFileREV, "file")
+```
+
+The original FAS output looks like this:
+
+```{r}
+FASscores %>%
+    dplyr::slice(1:10) %>%
+    kable(., "html", align="c", caption="Fitted cassette exon events") %>%
+    kableExtra::kable_styling("striped") %>%
+    kableExtra::scroll_box(height="300px", width = "94%")
+```
+
+The data.frame is adjusted by adding an ID (starting at 1), the event_id,
+frameshift information, stop codon information and the group (shortened,
+elongated, disrupted). There is also a group called "other", which is the
+case when the distal and proximal proteins were identical (both share
+the same stop codon -> intron in 3'UTR). All pairs belonging to "other"
+have a score of 1. Actually this group is a subset of "disrupted" as
+both Proximal and Distal share a stop codon.
+
+FAS scores are directional, which is why there are two FAS score columns 
+that are named FAS_F and FAS_B. The first one is the score for the
+comparison of the sequence in column 1 against the sequence in column 3, 
+meaning Distal against Proximal. The latter score is the other direction. 
+FAS_F was renamed to Distal_in_Proximal and FAS_B to Proximal_in_Distal.
+
+In addition, the column *ofInterest* is added, which is TRUE if the group 
+is either shortened or elongated and one of the two scores is $\le$ 0.9,
+which indicates a substantial change in the feature architecture.
+
+```{r}
+
+FASscores$ID <- 1:nrow(FASscores)
+
+FASscores$event_id <- NA
+FASscores$event_id[grepl("ENSG", FASscores$geneID)] <- paste0("ENSG", FASscores$geneID[grepl("ENSG", FASscores$geneID)] %>% strsplit(., "ENSG", fixed=T) %>% sapply(., "[[", 2) %>% strsplit(., "-D") %>% sapply(., "[[",1))
+FASscores$event_id[grepl("ENSG", FASscores$orthoID)] <- paste0("ENSG", FASscores$orthoID[grepl("ENSG", FASscores$orthoID)] %>% strsplit(., "ENSG", fixed=T) %>% sapply(., "[[", 2) %>% strsplit(., "-P") %>% sapply(., "[[",1))
+
+
+
+FASscores <- left_join(FASscores, classificationDf)
+
+FASscores$group[is.na(FASscores$group)] <- "other"
+
+FASscores <- FASscores %>% dplyr::rename(., Distal_in_Proximal = FAS_F,
+                                         Proximal_in_Distal = FAS_B) %>%
+    mutate(group = factor(group, levels = c("shortened", "elongated",
+                                            "disrupted", "other"))) %>%
+    arrange(desc(group))
+
+
+
+FASscores <- FASscores %>%
+    mutate(ofInterest = ifelse(group %in% c("shortened","elongated") & (Distal_in_Proximal <= 0.9 | Proximal_in_Distal <= 0.9), TRUE, FALSE))
+```
+
+The adjusted FAS output looks like this:
+
+```{r}
+FASscores %>%
+    dplyr::slice(1:10) %>%
+    kable(., "html", align="c") %>%
+    kableExtra::kable_styling("striped") %>%
+    kableExtra::scroll_box(height="300px", width = "94%")
+```
+
+# 2D FAS score plot
+
+The two FAS scores of each pair are used for a scatterplot and the 
+`r sum(FASscores$ofInterest)` pairs labeled as *ofInterest* highlighted with
+a red circle.
+
+```{r}
+
+FASscores %>%
+arrange(desc(group)) %>%
+ggplot(., aes(x=Distal_in_Proximal, y=Proximal_in_Distal)) +
+    geom_point(size=3, mapping=aes(col=group, alpha=ofInterest)) +
+    geom_point(data = . %>% dplyr::filter(ofInterest),
+               shape=1, size=5, col="red") +
+    scale_color_manual(values=c("disruped" = "lightgrey",
+                                "other" = "lightgrey",
+                                "shortened" = "#42B540FF",
+                                "elongated" = "#0099B4FF")) +
+    scale_alpha_manual(values=c("TRUE" = 1,
+                                "FALSE" = .25)) +
+    myTheme + theme(legend.position = "bottom",
+    axis.text.x = element_text(angle=45, hjust=1, vjust=1)) +
+    guides(color = guide_legend(title.position = "top", title.hjust = 0.5),
+           alpha = guide_legend(title.position = "top", title.hjust = 0.5))
+```
+
+# Beeswarm plot
+
+```{r}
+plot_df <- FASscores %>%
+    select(ID, Distal_in_Proximal, Proximal_in_Distal, group) %>%
+    mutate(group = forcats::fct_recode(group, disrupted="other")) %>%
+    rowwise %>%
+    mutate(min_score = min(Distal_in_Proximal, Proximal_in_Distal)) %>%
+    mutate(color_point = ifelse(min_score <= 0.9, "Yes", "No")) %>%
+    ungroup
+
+ggplot(plot_df, aes(x=group, y=min_score, color = color_point)) +
+    geom_quasirandom() +
+    geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+    coord_cartesian(ylim=c(0,1)) +
+    scale_color_manual(values=c("Yes" = "red",
+                                "No" = "darkgrey")) +
+    labs(y="Minimal FAS score per event", x="") +
+    myTheme +
+    theme(aspect.ratio = 2/1,
+          axis.text.x = element_text(angle=45, hjust=1, vjust=1))
+
+ggplot(plot_df %>% filter(group != "disrupted"), aes(x=group, y=min_score, color = color_point)) +
+    geom_quasirandom() +
+    coord_cartesian(ylim=c(0,1)) +
+    scale_color_manual(values=c("Yes" = "red",
+                                "No" = "darkgrey")) +
+    labs(y="Minimal FAS score per event", x="") +
+    myTheme +
+    theme(aspect.ratio = 2/1,
+          axis.text.x = element_text(angle=45, hjust=1, vjust=1))
+    
+
+    
+```
+
+
+# Events of interest
+
+A function to plot the pairwise alignments of the paired 
+protein sequences was created. The scrollbar below the alignments allows to
+approximate the position of the A5SS event in the Domain architecture 
+plots. 
+
+```{r}
+printAlignment <- function(id){
+    pair <- seqs[c(FASscores$geneID[FASscores$ID == id], 
+                   FASscores$orthoID[FASscores$ID == id])]
+    alg <- pairwiseAlignment(pair[1], pair[2],
+                             type="global")
+    seq <- c(alignedPattern(alg), alignedSubject(alg))
+    print(seq %>% as.character)
+}
+```
+
+## Shortened 
+
+```{r}
+ids_shortened <- FASscores %>%
+    dplyr::filter(ofInterest & group=="shortened") %>%
+    dplyr::pull(ID)
+
+name_to_id_shortened <- FASscores %>%
+    dplyr::filter(ID %in% ids_shortened) %>%
+    dplyr::select(ID,event_id) %>%
+    left_join(., sequenceInformation %>%
+                  dplyr::select(event_id, gene_name))
+
+```
+
+```{r results='asis'}
+for(id in ids_shortened){
+    cat("\n")
+    cat('\n## Gene name = ', name_to_id_shortened$gene_name[name_to_id_shortened$ID == id], '\n')
+    
+    print(
+        FASscores[FASscores$ID == id,] %>%
+        kable(., "html", row.names = F) %>%
+        kableExtra::kable_styling("striped") %>%
+        kableExtra::column_spec(column = c(1,3), width_min = "300px") %>%
+        kableExtra::scroll_box(height="120px", width = "94%")
+    )
+    
+    knitr::knit_child( text=c(
+    '```{r}',
+    'printAlignment(id)',
+    '```',
+    ''
+      ) , envir=environment() , quiet=TRUE) %>% cat(., sep="\n")
+    
+    seedID <- FASscores[FASscores$ID == id,] %>% pull(geneID)
+    orthoID <- FASscores[FASscores$ID == id,] %>% pull(orthoID)
+    info <- c(seedID, orthoID)
+    
+    plotFWD <- tryCatch(createArchiPlot(info, domainDfFWD, 9, 9),
+                    error=function(e){
+                      ggplot()
+                    })
+    
+    plotREV <- tryCatch(createArchiPlot(info, domainDfREV, 9, 9),
+                error=function(e){
+                  ggplot()
+                })
+    
+    #plotFWD <- createArchiPlot(info, domainDfFWD, 9, 9)
+    
+    cat('\n### Forward domain file', '\n')
+    print(ggpubr::ggarrange(plotFWD))
+    cat("\n")
+    
+    cat('\n### Reverse domain file', '\n')
+    print(ggpubr::ggarrange(plotREV))
+    cat("\n")
+}
+
+```
+
+## Elongated 
+
+```{r}
+ids_elongated <- FASscores %>%
+    dplyr::filter(ofInterest & group=="elongated") %>%
+    dplyr::pull(ID)
+
+name_to_id_elongated <- FASscores %>%
+    dplyr::filter(ID %in% ids_elongated) %>%
+    dplyr::select(ID, event_id) %>%
+    left_join(., sequenceInformation %>%
+                  dplyr::select(event_id, gene_name))
+```
+
+```{r results='asis'}
+for(id in ids_elongated){
+    cat("\n")
+    cat('\n## Gene name = ', name_to_id_elongated$gene_name[name_to_id_elongated$ID == id], '\n')
+    
+    print(
+        FASscores[FASscores$ID == id,] %>%
+        kable(., "html", row.names = F) %>%
+        kableExtra::kable_styling("striped") %>%
+        kableExtra::column_spec(column = c(1,3), width_min = "300px") %>%
+        kableExtra::scroll_box(height="120px", width = "94%")
+    )
+    
+    knitr::knit_child( text=c(
+    '```{r}',
+    'printAlignment(id)',
+    '```',
+    ''
+      ) , envir=environment() , quiet=TRUE) %>% cat(., sep="\n")
+    
+    seedID <- FASscores[FASscores$ID == id,] %>% pull(geneID)
+    orthoID <- FASscores[FASscores$ID == id,] %>% pull(orthoID)
+    info <- c(seedID, orthoID)
+    
+    plotFWD <- tryCatch(createArchiPlot(info, domainDfFWD, 9, 9),
+                    error=function(e){
+                      ggplot()
+                    })
+    
+    plotREV <- tryCatch(createArchiPlot(info, domainDfREV, 9, 9),
+                error=function(e){
+                  ggplot()
+                })
+    
+    #plotFWD <- createArchiPlot(info, domainDfFWD, 9, 9)
+    
+    cat('\n### Forward domain file', '\n')
+    print(ggpubr::ggarrange(plotFWD))
+    cat("\n")
+    
+    cat('\n### Reverse domain file', '\n')
+    print(ggpubr::ggarrange(plotREV))
+    cat("\n")
+}
+
+```
+
+# Session Information
+
+```{r}
+sessionInfo()
+```

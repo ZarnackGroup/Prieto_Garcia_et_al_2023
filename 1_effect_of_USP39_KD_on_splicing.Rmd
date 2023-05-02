@@ -1,0 +1,731 @@
+---
+title: "Effect of USP39 knockdown on splicing"
+author:
+- name: Mario Keller
+  affiliation: Faculty of Biological Sciences, Goethe University Frankfurt
+output:
+  BiocStyle::html_document:
+      toc: TRUE
+      toc_float: TRUE
+      code_folding: hide
+  
+header-includes:
+- \makeatletter\renewcommand*{\fps@figure}{h}\makeatother
+- \usepackage{placeins}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, message=FALSE, warning=FALSE,
+                      results=TRUE, crop=NULL)
+```
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(ggpubr)
+library(ggsci)
+library(ggpointdensity)
+library(viridis)
+library(patchwork)
+library(ggvenn)
+library(ggrastr)
+library(ggupset)
+library(ComplexHeatmap)
+library(circlize)
+library(GenomicRanges)
+library(ggbeeswarm)
+library(rtracklayer)
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+```
+
+```{r}
+myTheme <- theme_bw() +
+    theme(axis.text = element_text(size = 14, colour="black"),
+          axis.title = element_text(size=16, colour="black"),
+          axis.ticks=element_line(color="black"),
+          axis.ticks.length=unit(.15, "cm"),
+          panel.border=element_rect(color="black", fill = NA),
+          panel.background = element_blank(),
+          plot.background = element_blank(),
+          legend.text = element_text(size=12),
+          legend.position = "none")
+```
+
+# Background 
+
+Based on the Voila modulizer output the effect of USP39 knockdown should be
+analyzed.
+
+# Data
+
+Binary events are loaded from binaryEventsByModulizer.rds, which was generated
+with modulizer_output_to_rds.R. The loaded list contains 14 data.frames
+(one for each AS event class) with splicing quantifications.
+
+```{r input}
+binaryEvents <- readRDS("rds_files/binaryEventsByModulizer.rds")
+```
+
+# Identification of regulated splicing events
+
+The identification of regulated events is still a little bit challenging and is a trade-off between being too stringent and loosing actually regulated events and being too loose and include false positives. 
+
+The 14 data.frames of the AS event classes have for each event either 2 or 4 rows. The number of rows depends on the number of LSVs that describe the AS event. For instance, cassette exon events are viewed from a source and target LSV perspective and we have for each of the LSVs two junctions (C1_C2 + C1_A and C2_C1 + C2_A), which are given as a row. On the other hand intron retention events are viewed only from a single LSV perspective, which is why we have just two junctions involved (C1_C2_intron + C1_C2_spliced or C2_C1_intron + C2_C1_spliced).
+
+My current workflow is the following:
+
+* Identify for each of the 14 AS event classes regulated events
+    + Events with 2 junctions: Both junctions must have Prob(dPSI>=0.05) >= 0.9 and abs(dPSI>=0.1)
+    + Events with 4 junctions: At least two junctions of the same LSV must have Prob(dPSI>=0.05) >= 0.9 and all junctions abs(dPSI>=0.1)
+    + All pairs of junctions must have inverse regulation (execept for the multi exon spanning class*)
+    + Within junction pairs, the the lower |dPSI| must bet at least 50% of the higher |dPSI|
+    
+Note: *For the multi exon spanning class the the dPSI of the proximal junctions is the same as the dPSI of the distal junctions. Probably a bug as they could have provided the correct dPSI.
+
+```{r}
+
+regulatedEvents <- lapply(names(binaryEvents), function(eventClass){
+   
+    eventsClassDf <- binaryEvents[[eventClass]]
+
+    df <- eventsClassDf %>%
+        dplyr::select(gene_name, module_id, event_id, lsv_id,
+                      KD.CT_probability_changing, KD.CT_median_dpsi)
+    
+    notFullyQuantified <- df %>%
+        dplyr::filter(., is.na(KD.CT_probability_changing) |
+                          is.na(KD.CT_median_dpsi)) %>%
+        pull(event_id) %>%
+        unique
+    
+    df <- df %>%
+        dplyr::filter(!event_id %in% notFullyQuantified) %>%
+        dplyr::filter(., !lsv_id == "") %>%
+        group_by(event_id, lsv_id) %>%
+        summarise(., gene_name = unique(gene_name), module_id = unique(module_id),
+                  regulated= sum(KD.CT_probability_changing >= 0.9) == 2,
+                  change = sum(abs(KD.CT_median_dpsi) >= 0.1) == 2,
+                  opposite = sum(sign(KD.CT_median_dpsi)) == 0,
+                  fraction = sum(abs(KD.CT_median_dpsi/max(abs(KD.CT_median_dpsi))) >= 0.5) == 2) %>%
+        summarise(gene_name=unique(gene_name), module_id=unique(module_id),
+                  regulated = any(regulated),
+                  change=all(change),
+                  opposite=all(opposite),
+                  fraction=all(fraction))
+    
+    if(eventClass == "multi_exon_spanning"){
+        df <- df %>% dplyr::filter(regulated, change, fraction) %>%
+            dplyr::select(gene_name, module_id, event_id)
+    } else {
+        df <- df %>% dplyr::filter(regulated, change, opposite, fraction) %>%
+            dplyr::select(gene_name, module_id, event_id)
+    }
+    
+    if(nrow(df) == 0){
+        df <- data.frame(eventClass=character(), gene_name=character(), module_id=character(), event_id=character())
+        
+    } else {
+       df <- cbind(eventClass = eventClass, df) 
+    }  
+    
+    return(df)
+}) %>% bind_rows()
+
+```
+
+In the following, the number of events per AS event class is determined and
+events that are not of interest to us grouped as "other".
+
+```{r}
+regulatedEventFrequencies <- regulatedEvents %>%
+    dplyr::count(eventClass, name="Frequency")
+
+kable(regulatedEventFrequencies, align="c")
+
+eventsOfInterest <- c("cassette", "alternative_intron", "multi_exon_spanning",
+                      "alternate_first_exon", "alternate_last_exon",
+                      "alt5prime", "alt3prime", "other")
+
+regulatedEventFrequencies <- regulatedEventFrequencies %>%
+    add_row(
+        regulatedEventFrequencies %>% filter(!eventClass %in% eventsOfInterest)  %>%
+            summarise(eventClass="other", Frequency = sum(Frequency)) %>%
+            select(eventClass, Frequency)
+) %>% filter(., eventClass %in% eventsOfInterest) %>%
+    mutate(eventClass=factor(eventClass, levels=rev(eventsOfInterest)))
+```
+
+```{r}
+regulatedEventFrequencies %>%
+    mutate(eventClass=factor(eventClass)) %>%
+    arrange(eventClass) %>%
+    dplyr::rename(count="Frequency") %>%
+    ggpie::ggdonut(., group_key = "eventClass", count_type = "count",
+        label_info = "all", label_type = "horizon", label_split = NULL,
+        label_size = 4, label_pos = "in", labal_threshold = 10,
+        donut.label.color = "black") +
+    scale_fill_npg(name="AS event type") 
+
+```
+
+Roughly 50% of the regulated AS events correspond to A5SS events.
+
+# Focus on A5SS
+
+## Regulation of distal and proximal junctions
+
+The regulation of the distal and proximal junctions is examined by plotting
+their usage (PSI) in the control and USP39 knockdown condition.
+
+```{r}
+
+regulationDF <- binaryEvents$alt5prime %>% dplyr::select(event_id, junction_name, CT_median_psi, KD_median_psi, KD.CT_median_dpsi, denovo) %>% 
+    mutate(regulation = case_when(event_id %in% regulatedEvents$event_id & KD.CT_median_dpsi > 0 ~ "up",
+                                  event_id %in% regulatedEvents$event_id & KD.CT_median_dpsi < 0 ~ "down",
+                                  (!event_id %in% regulatedEvents$event_id) ~ "no")) %>% 
+    mutate(regulation=factor(regulation, levels=c("no", "down", "up")))
+
+# Scatterplot PSIs
+plot_df <- regulationDF %>%
+    arrange(regulation)
+
+ggplot(plot_df %>% filter(regulation == "no"), aes(x=CT_median_psi, y=KD_median_psi, col=regulation)) +
+rasterize(geom_point(size=1), dpi=300) +
+    geom_point(data=plot_df %>% filter(regulation != "no")) +
+geom_abline(intercept=0, slope=1) +
+facet_wrap(~junction_name) +
+scale_color_manual(values=c("up" = "#345784", "no" = "lightgrey", "down" = "#45bcd4")) +
+labs(x="Junction usage in control (PSI)", y="Junction usage in knockdown (PSI)") +
+myTheme + theme(legend.position = "right",
+                aspect.ratio=1,
+                axis.text.x = element_text(angle=45, hjust=1, vjust=1))
+    
+regulationDF %>%
+          dplyr::filter(regulation %in% c("up", "down")) %>%
+    dplyr::count(junction_name, regulation) %>%
+    ggplot(., aes(x=junction_name, y=n, fill=regulation)) +
+    geom_col() +
+    scale_y_continuous(breaks=seq(0,1000,250), limits=c(0,1000)) +
+    scale_fill_manual(values=c("up" = "#345784", "no" = "lightgrey", "down" = "#45bcd4")) +
+    geom_text(aes(label = stat(y), group = junction_name), stat = 'summary', fun = sum, vjust = -.25) +
+    labs(x="Junction", y="Number of junctions") +
+    myTheme + theme(legend.position = "right",
+                    aspect.ratio=1)
+    
+
+# Group sizes
+kable(regulationDF %>% count(junction_name, regulation), align="c")    
+```
+
+## Annotation information of distal and proximal junctions
+
+Next, the annotaiton status of the distal and proximal junctions of each regulated
+A5SS event was determined, which is provided in the "denovo" column of the Voila
+modulizer output. 
+
+```{r}
+regulationDF %>%
+    dplyr::filter(regulation %in% c("up", "down")) %>%
+    dplyr::rename(annotated = denovo) %>%
+    mutate(annotated=ifelse(annotated == "True", "No", "Yes")) %>%
+    dplyr::count(junction_name, annotated) %>%
+    ggplot(., aes(x=junction_name, y=n, fill=annotated)) +
+        geom_col() +
+        scale_y_continuous(breaks=seq(0,1000,250), limits=c(0,1000)) +
+        scale_fill_manual(values=c("No" = "grey", "Yes" = "black")) +
+        geom_text(aes(label = stat(y), group = junction_name), stat = 'summary', fun = sum, vjust = -.25) +
+        labs(x="Junction", y="Number of junctions") +
+        myTheme + theme(legend.position = "right",
+                        aspect.ratio = 1)
+```
+
+Around 2/3 of the junctions are annotated with slightly more distal junctions
+being annotated.
+
+In addition, the annotation status of junction pairs was determined.
+
+```{r}
+regulationDF %>%
+    dplyr::filter(regulation %in% c("up", "down")) %>%
+    dplyr::rename(annotated = denovo) %>%
+    mutate(annotated=ifelse(annotated == "True", "No", "Yes")) %>% 
+    group_by(event_id) %>% 
+    arrange(junction_name) %>%
+    summarize(Distal_Proximal=paste0(annotated, collapse="-")) %>% 
+    dplyr::count(Distal_Proximal) %>%
+    arrange(Distal_Proximal) %>%
+    dplyr::rename(count=n) %>%
+    ggpie::ggdonut(., group_key = "Distal_Proximal", count_type = "count",
+        label_info = "all", label_type = "horizon", label_split = NULL,
+        label_size = 4, label_pos = "in", labal_threshold = 10,
+        donut.label.color = "black") +
+    scale_fill_npg(name="Distal-Proximal") 
+```
+
+Only 6 events exist for which none of the two junctions is known,  29.1% of the
+events have both junctions annotated and 70.3% of the events have either the distal
+or proximal junction annotated.
+
+Further, the annotation status was checked with respect to the regulation of 
+the junctions. For this purpose, the `r sum(regulationDF$regulation != "no")`
+junctions of regulated events were considered as either up- or downregulated and 
+the fraction of annotated junctions determined for both sets.
+
+```{r}
+regulationDF %>%
+    dplyr::filter(regulation %in% c("up", "down")) %>%
+    dplyr::rename(annotated = denovo) %>%
+    mutate(annotated=ifelse(annotated == "True", "No", "Yes")) %>% 
+    group_by(regulation) %>% 
+    summarize(Yes=sum(annotated == "Yes") / n(),
+              No=sum(annotated == "No") / n()) %>%
+    pivot_longer(cols=2:3, names_to="annotated", values_to = "fraction") %>%
+    ggplot(., aes(x=regulation, y=fraction, fill=annotated)) +
+    geom_col() +
+    scale_fill_manual(values=c("No" = "grey", "Yes" = "black")) +
+    labs(x="Regulation of junction in knockdown",
+         y="Fraction of junctions") +
+    myTheme + theme(legend.position = "right") 
+
+
+regulationDF %>%
+    dplyr::filter(regulation %in% c("up", "down")) %>%
+    dplyr::rename(annotated = denovo) %>%
+    mutate(annotated=ifelse(annotated == "True", "No", "Yes")) %>% 
+    group_by(regulation) %>% 
+    summarize(Fraction_anno=sum(annotated == "Yes") / n(),
+              Total_anno = sum(annotated == "Yes"),
+              Fraction_non_anno=sum(annotated == "No") / n(),
+              Total_non_anno = sum(annotated == "No")) %>%
+    kable(., "html") %>% kableExtra::kable_styling("striped") %>% kableExtra::scroll_box(width = "100%")
+
+```
+
+Out of the downregulated junctions about 99% are annotated, while 
+only ~30% for the upregulated junctions are annotated.
+
+## Biotype of genes harboring A5SS events
+
+The biotype of the genes harboring the regulated A5SS events was
+inferred from the Gencode GFF3-File.
+
+```{r}
+anno <- import("data/gencode.v38.annotation.gff3")
+biotype_to_gene <- anno[anno$type == "gene"] %>% as.data.frame %>%
+    dplyr::select(ID, gene_type) %>% dplyr::rename(gene_id = ID, biotype = gene_type)
+
+regulationDF$gene_id <- regulationDF$event_id %>% strsplit(., "_", fixed=TRUE) %>% sapply(., "[[", 1)
+
+regulationDF <- left_join(regulationDF, biotype_to_gene)
+
+regulationDF %>% dplyr::filter(regulation %in% c("up", "down") & junction_name == "Proximal") %>%
+    count(biotype) %>% 
+    arrange(biotype) %>%
+    dplyr::rename(count=n) %>%
+    ggpie::ggdonut(., group_key = "biotype", count_type = "count",
+        label_info = "all", label_type = "horizon", label_split = NULL,
+        label_size = 4, label_pos = "in", labal_threshold = 10,
+        donut.label.color = "black") +
+    scale_fill_npg(name="biotype")
+    
+```
+
+The vast majority of A5SS events is located in transcripts of protein-coding genes.
+
+## Generation of GRanges objects for A5SS events
+
+For upcoming analyses each A5SS event is stored as a GRanges object, which is 
+comprised by the three involved exons:
+
+* E1P: Exon coordinates of the upstream exon when the proximal junction is used (longer version)
+* E1D: Exon coordinates of the upstream exon when the distal junction is used (shorter version)
+* E2: Exon coordinates of the downstream exon
+
+The GRangesList is stored as RDS-File.
+
+```{r}
+
+if(!file.exists("rds_files/A5SSranges.rds")){
+
+    candidateIDs <- regulatedEvents %>%
+        dplyr::filter(eventClass == "alt5prime") %>%
+        pull(event_id)
+    
+    A5SSevents <- binaryEvents$alt5prime %>%
+        dplyr::filter(event_id %in% candidateIDs)
+        
+    A5SSranges <- lapply(split(A5SSevents, A5SSevents$event_id), function(df){
+        
+        df <- df %>%
+            dplyr::rename(chr=seqid, exon=spliced_with)
+        
+        tmpE1 <- df$reference_exon_coord %>% unique %>% strsplit(., "-", fixed=T) %>% unlist %>% as.integer
+        tmpE2 <- df$spliced_with_coord %>% unique %>% strsplit(., "-", fixed=T) %>% unlist %>% as.integer
+        
+        gr <- data.frame(chr=df$chr[1],
+                          strand=df$strand[1],
+                          start=c(tmpE1[1], tmpE2[1]),
+                          end=c(tmpE1[2], tmpE2[2])) %>%
+            makeGRangesFromDataFrame() %>%
+            sort
+        
+        if(df$strand[1] == "+"){
+            gr$exon <- c("E1P", "E2")
+        } else {
+            gr$exon <- c("E2", "E1P")
+        }
+        
+        gr <- c(gr, gr[gr$exon == "E1P"])
+        
+        if(df$strand[1] == "+"){
+            end(gr)[3] <- df %>% dplyr::filter(junction_name == "Distal") %>% pull(junction_coord) %>% strsplit(., "-", fixed=T) %>% sapply(., "[[", 1) %>% as.integer
+            gr$exon[3] <- "E1D"
+        } else {
+            start(gr)[3] <- df %>% dplyr::filter(junction_name == "Distal") %>% pull(junction_coord) %>% strsplit(., "-", fixed=T) %>% sapply(., "[[", 2) %>% as.integer
+            gr$exon[3] <- "E1D"
+        }
+        
+        gr <- gr %>% sort()
+        
+        gr$module_id <- df$module_id[1]
+        gr$event_id <- df$event_id[1]
+        gr$lsv_id <- df$lsv_id[1]
+        gr$gene_id <- df$gene_id[1]
+        gr$gene_name <- df$gene_name[1]
+        gr$event_size <- df$event_size[1]
+        
+        gr$CT_median_psi <- NA
+        gr$CT_median_psi[gr$exon == "E1P"] <- df$CT_median_psi[df$junction_name=="Proximal"]
+        gr$CT_median_psi[gr$exon == "E1D"] <- df$CT_median_psi[df$junction_name=="Distal"]
+        
+        gr$KD_median_psi <- NA
+        gr$KD_median_psi[gr$exon == "E1P"] <- df$KD_median_psi[df$junction_name=="Proximal"]
+        gr$KD_median_psi[gr$exon == "E1D"] <- df$KD_median_psi[df$junction_name=="Distal"]
+        
+        gr$KD.CT_median_dpsi <- NA
+        gr$KD.CT_median_dpsi[gr$exon == "E1P"] <- df$KD.CT_median_dpsi[df$junction_name=="Proximal"]
+        gr$KD.CT_median_dpsi[gr$exon == "E1D"] <- df$KD.CT_median_dpsi[df$junction_name=="Distal"]
+        
+        gr$KD.CT_probability_changing <- NA
+        gr$KD.CT_probability_changing[gr$exon == "E1P"] <- df$KD.CT_probability_changing[df$junction_name=="Proximal"]
+        gr$KD.CT_probability_changing[gr$exon == "E1D"] <- df$KD.CT_probability_changing[df$junction_name=="Distal"]
+        
+        gr$denovo <- NA
+        gr$denovo[gr$exon == "E1P"] <- df$denovo[df$junction_name=="Proximal"]
+        gr$denovo[gr$exon == "E1D"] <- df$denovo[df$junction_name=="Distal"]
+        
+        return(gr)
+    }) %>% as(., "GRangesList")
+    
+    saveRDS(A5SSranges, "rds_files/A5SSranges.rds")
+} else {
+    A5SSranges <- readRDS("rds_files/A5SSranges.rds")
+}
+```
+
+## Overlaps with CDSs
+
+Based on the shorter upstream exon (E1D) overlaps with annoated CDSs were
+determined.
+
+```{r}
+
+CDS <- anno %>% plyranges::filter(type=="CDS" & transcript_type == "protein_coding")
+
+A5SSranges <- A5SSranges[names(A5SSranges) %in%
+                              (regulationDF %>% dplyr::filter(
+                                  regulation %in% c("up", "down") &
+                                      junction_name == "Proximal" &
+                                      biotype == "protein_coding") %>%
+                                   pull(event_id))]
+
+E1Dranges <- endoapply(A5SSranges, function(gr){
+    gr <- gr[gr$exon == "E1D"]
+    return(gr)
+}) %>% unlist
+
+anyOverlaps <- findOverlaps(E1Dranges, CDS, type="any") %>% as.data.frame()
+
+phaseInfoRanges <- lapply(split(anyOverlaps, anyOverlaps$queryHits), function(df){
+    
+    gr1 <- E1Dranges[df$queryHits[1]]
+    
+    tmpCDS <- CDS[df$subjectHits]
+    
+    tmpCDS <- tmpCDS[tmpCDS$gene_id == gr1$gene_id]
+    
+    if(length(tmpCDS) == 0){return(data.frame())}
+    
+    phaseInfo <- tmpCDS %>%
+        as.data.frame(., stringsAsFactors=FALSE) %>%
+        dplyr::select(seqnames, strand, start, end, width, strand, type, phase, gene_id, gene_name) %>%
+        mutate(across(where(is.factor), as.character)) %>%
+        mutate(phase=factor(phase, levels=c(0,1,2))) %>%
+        count(seqnames, strand, start, end, phase, .drop=FALSE) %>% pivot_wider(., names_from=phase, values_from=n) %>%
+        rowwise() %>%
+        mutate(phaseSum=sum(c_across(5:7))) %>% 
+        ungroup
+    
+    gr2 <- phaseInfo %>% makeGRangesFromDataFrame(keep.extra.columns = T)
+    phaseInfo$length_overlap <- pintersect(rep(gr1, length(gr2)), gr2) %>% width
+    
+    phaseInfo <- phaseInfo %>% arrange(desc(length_overlap), desc(phaseSum)) %>% dplyr::slice(1)
+    phaseInfo$event_id <- gr1$event_id
+    phaseInfo$length_E1D <- gr1 %>% width
+    
+    return(phaseInfo)
+}) %>% bind_rows() %>% makeGRangesFromDataFrame(., keep.extra.columns = TRUE)
+
+```
+
+The number of protein-coding gene overlapping A5SS events with an assigned CDS
+exon is shown below. Note that those events lacking a CDS are located in 5' or
+3' UTRs.
+
+```{r}
+data.frame(overlap=c(TRUE, FALSE), count=c(length(phaseInfoRanges), length(E1Dranges) - length(phaseInfoRanges))) %>%
+    arrange(overlap) %>%
+    ggpie::ggdonut(., group_key = "overlap", count_type = "count",
+        label_info = "all", label_type = "horizon", label_split = NULL,
+        label_size = 4, label_pos = "in", labal_threshold = 10,
+        donut.label.color = "black") +
+    scale_fill_npg(name="overlap with CDS exon") 
+```
+
+## Adjusting distal/proximal exon 5' ends
+
+5' ends of the upstream exons (E1D and E1P) were truncated such the phase is 0.
+This step is necessary for the upcoming in silico translation.
+
+```{r}
+# Adjust exon boundaries
+adjustedA5SSranges <- endoapply(A5SSranges, function(gr){
+    
+    if(!gr$event_id[1] %in% phaseInfoRanges$event_id){return(GRanges())}
+    
+    #print(gr$event_id[1])
+    
+    #Get matched CDS exon
+    grMatched <- phaseInfoRanges[phaseInfoRanges$event_id == gr$event_id[1]]
+    
+    #Remove nucleotides from matched CDS exon so the phase is 0
+    nucleotidesToRemove <- which.max(c(mcols(grMatched)[,1], mcols(grMatched)[,2], mcols(grMatched)[,3])) - 1
+    grMatched <- resize(grMatched, width = width(grMatched) - nucleotidesToRemove, fix="end")
+    
+    if(strand(gr) %>% as.character == "+" & start(gr[gr$exon == "E1D"]) <= start(grMatched)){
+        start(gr[gr$exon %in% c("E1D", "E1P")]) <- start(grMatched)
+    } else if(strand(gr) %>% as.character == "+" & start(gr[gr$exon == "E1D"]) > start(grMatched)){
+        
+        diff <- start(gr[gr$exon == "E1D"]) - start(grMatched)
+        nucleotidesToRemove <- 3 - diff %% 3
+        start(gr[gr$exon %in% c("E1D", "E1P")]) <- start(gr[gr$exon %in% c("E1D", "E1P")]) + nucleotidesToRemove
+        
+    } else if(strand(gr) %>% as.character == "-" & end(gr[gr$exon == "E1D"]) >= end(grMatched)){
+        end(gr[gr$exon %in% c("E1D", "E1P")]) <- end(grMatched)
+    } else if(strand(gr) %>% as.character == "-" & end(gr[gr$exon == "E1D"]) < end(grMatched)){
+        diff <- end(grMatched) - end(gr[gr$exon == "E1D"])
+        nucleotidesToRemove <- 3 - diff %% 3
+        end(gr[gr$exon %in% c("E1D", "E1P")]) <- end(gr[gr$exon %in% c("E1D", "E1P")]) - nucleotidesToRemove
+    }
+    return(gr)
+})
+```
+
+## Inference of peptide sequences and stop codons
+
+For the two upstream exons (E1D and E1P) the nucleotide sequence is extracted and
+did translated into an AA sequence. If a stop codon (*) is located in the AA
+sequence, everything after the stop codon is removed. Peptide sequences are stored
+together with additional information in a data.frame.
+
+```{r}
+
+peptideDF <- lapply(adjustedA5SSranges, function(gr){
+    
+    if(length(gr) == 0){return(data.frame())}
+    
+    E1D_seq <- getSeq(Hsapiens, gr[gr$exon == "E1D"])
+    E1P_seq <- getSeq(Hsapiens, gr[gr$exon == "E1P"])
+    
+    
+    E1D_AAseq <- translate(E1D_seq, no.init.codon=TRUE) %>% as.character  # no.init.codon=TRUE as otherwise CTG will be M instead of L
+    E1P_AAseq <- translate(E1P_seq, no.init.codon=TRUE) %>% as.character 
+    
+    hasStopCodon <- grepl("*", c(E1D_AAseq, E1P_AAseq), fixed=T)
+    
+    E1D_AAseq <- E1D_AAseq %>% strsplit(., "*", fixed=TRUE) %>% sapply("[[", 1)
+    E1P_AAseq <- E1P_AAseq %>% strsplit(., "*", fixed=TRUE) %>% sapply("[[", 1)
+    #Speichern ob Stern da war
+    
+    return(
+        data.frame(
+            chr = seqnames(gr[1]) %>% as.character,
+            strand = strand(gr[1]) %>% as.character,
+            start_E1 = start(gr[match(c("E1D", "E1P"), gr$exon)]),
+            end_E1 = end(gr[match(c("E1D", "E1P"), gr$exon)]),
+            start_E2 = start(gr[match("E2", gr$exon)]),
+            end_E2 = end(gr[match("E2", gr$exon)]),
+            event_id = gr$event_id[1],
+            lsv_id = gr$lsv_id[1],
+            A5SS = c("Distal", "Proximal"),
+            psiCT = gr$CT_median_psi[match(c("E1D", "E1P"), gr$exon)],
+            psiKD = gr$KD_median_psi[match(c("E1D", "E1P"), gr$exon)],
+            dpsi = gr$KD.CT_median_dpsi[match(c("E1D", "E1P"), gr$exon)],
+            event_size = gr$event_size[1],
+            peptide_seq = c(E1D_AAseq, E1P_AAseq),
+            peptide_len = c(nchar(E1D_AAseq), nchar(E1P_AAseq)),
+            frame_shift = !(gr$event_size[match(c("E1D", "E1P"), gr$exon)] %% 3 == 0),
+            stop_codon = hasStopCodon
+    ))
+    
+}) %>% bind_rows()
+
+kable(peptideDF[1:5,], "html") %>% kableExtra::kable_styling("striped") %>% kableExtra::scroll_box(width = "100%")
+
+```
+
+## Frameshift information
+
+For those A5SS events overlapping a CDS exon, the frameshift pontential is
+determined by checking if the distance between the distal and proximal junction
+is a multiple of 3 or not.
+
+```{r}
+
+frameShiftDF <- peptideDF %>%
+    dplyr::filter(A5SS=="Proximal") %>%
+    mutate(frameshift = factor(ifelse(event_size %% 3 == 0, "No", "Yes"), levels=c("No", "Yes")))
+
+# Donut
+
+frameShiftDF %>%
+    dplyr::count(frameshift) %>%
+    arrange(frameshift) %>%
+    dplyr::rename(count=n) %>%
+    ggpie::ggdonut(., group_key = "frameshift", count_type = "count",
+        label_info = "all", label_type = "horizon", label_split = NULL,
+        label_size = 4, label_pos = "in", labal_threshold = 10,
+        donut.label.color = "black") +
+    scale_fill_npg(name="frameshift") 
+
+# Boxplot
+rbind(frameShiftDF %>% mutate(frameshift = "No/Yes"),
+      frameShiftDF) %>%
+    mutate(frameshift = factor(frameshift, levels=c("No/Yes", "No", "Yes"))) %>%
+    ggplot(., aes(x=frameshift, y=event_size)) +
+    geom_quasirandom() +
+    geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+    scale_y_log10(breaks=c(1,10,100,1000)) +
+    coord_cartesian(ylim=c(1,2500)) +
+    labs(x="Frameshift introduced", y="Extension by proximal splice site (nt)") +
+    myTheme + theme(aspect.ratio=1)
+    
+```
+
+## Final classification of events
+
+In the final step, A5SS events were classified based on the following 3 features:
+
+- Frameshift (TRUE / FALSE)
+- Stop codon introduced by one of the two A5SSs (TRUE / FALSE)
+- Change in exon length  (shortened = distal up / elongated = proximal up)
+
+At first, I the frequency of the 8 possible combinations was determined.
+
+```{r}
+classificationDF <- peptideDF %>% group_by(event_id) %>%
+    summarize(event_id=unique(event_id),
+              frameshift = unique(!event_size %% 3 == 0),
+              stop = any(stop_codon),
+              exon_length=ifelse(dpsi[1] > 0, "shortened", "elongated"))
+
+head(classificationDF)
+
+classificationDF %>% count(frameshift, stop, exon_length) %>% mutate (case=paste0("case", 1:8))
+```
+
+The final groups are: 
+
+- elongated (case 1)
+- shortened (case 2)
+- disruped (case3 to case8)
+
+```{r}
+classificationDF <- classificationDF %>%
+    mutate(group = case_when(!frameshift & !stop & exon_length == "elongated" ~ "elongated",
+                             !frameshift & !stop & exon_length == "shortened" ~ "shortened",
+                             TRUE ~ "disrupted")
+           )
+
+
+classificationDF %>% count(group) %>%
+    mutate(group = factor(group, levels=c("shortened", "elongated", "disrupted"))) %>%
+    ggplot(., aes(x=group, y=n)) +
+    geom_col() +
+    labs(x="Effect on reading frame", y="Number of A5SS events\nlocated in CDSs") +
+    geom_text(aes(label=n), vjust=-.5) +
+    myTheme
+
+classificationDF %>% count(group)
+
+
+```
+
+The underlying data.frame is stored and used in upcoming analyses.
+
+```{r}
+saveRDS(classificationDF, "rds_files/classificationDF.rds")
+```
+
+# XLSX-Files
+
+A XLSX-File with all genes containing an A5SS event and group membership is
+prepared.
+
+```{r}
+xlsx1 <- lapply(classificationDF$event_id, function(eventID){
+    tmpDF <- classificationDF %>% dplyr::filter(event_id == eventID)
+    gr <- A5SSranges[[eventID]]
+    exon_order = c(which(gr$exon == "E1D"), which(gr$exon == "E1P"), which(gr$exon == "E2"))
+    
+    data.frame(gene_id = gr$gene_id[1],
+               gene_name = gr$gene_name[1],
+               event_id = eventID,
+               event_size = gr$event_size[1],
+               strand = strand(gr[1]) %>% as.character,
+               chr = seqnames(gr[1]) %>% as.character,
+               has_frameshift = tmpDF$frameshift,
+               has_stop = tmpDF$stop,
+               KD_effect_exon_length = tmpDF$exon_length,
+               classification = tmpDF$group,
+               exon_E1D = paste0(ranges(gr[exon_order[1]]) %>% start, "-", ranges(gr[exon_order[1]]) %>% end),
+               exon_E1P = paste0(ranges(gr[exon_order[2]]) %>% start, "-", ranges(gr[exon_order[2]]) %>% end),
+               exon_E2 = paste0(ranges(gr[exon_order[3]]) %>% start, "-", ranges(gr[exon_order[3]]) %>% end),
+               PSI_CT_E1D = gr[exon_order[1]]$CT_median_psi,
+               PSI_CT_E1P = gr[exon_order[2]]$CT_median_psi,
+               PSI_KD_E1D = gr[exon_order[1]]$KD_median_psi,
+               PSI_KD_E1P = gr[exon_order[2]]$KD_median_psi,
+               dPSI_E1D = gr[exon_order[1]]$KD.CT_median_dpsi,
+               dPSI_E1P = gr[exon_order[2]]$KD.CT_median_dpsi)
+}) %>% bind_rows()
+
+xlsx::write.xlsx2(xlsx1, "xlsx_files/final_767_A5SS_events.xlsx", row.names = F)
+```
+
+In addition, a XLSX-File providing for each AS event class the genes with at
+least one regulated event of this class is prepared.
+
+```{r}
+xlsx2 <- regulatedEvents %>%
+    dplyr::select(eventClass, gene_name, event_id) %>%
+    dplyr::rename(AS_event_type = eventClass)
+
+xlsx::write.xlsx2(xlsx2, "xlsx_files/all_1956_regulated_AS_events.xlsx", row.names = F)
+```
+
+# Session Information
+
+```{r}
+sessionInfo()
+```

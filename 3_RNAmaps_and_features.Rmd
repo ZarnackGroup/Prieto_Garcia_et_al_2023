@@ -1,0 +1,689 @@
+---
+title: "RNAmaps, Binding sites, k-mers"
+author:
+- name: Mario Keller
+  affiliation: Faculty of Biological Sciences, Goethe University Frankfurt
+output:
+  BiocStyle::html_document:
+      toc: TRUE
+      toc_float: TRUE
+      code_folding: hide
+  
+header-includes:
+- \makeatletter\renewcommand*{\fps@figure}{h}\makeatother
+- \usepackage{placeins}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE,
+                      results = TRUE, crop=NULL)
+```
+
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(ggsci)
+library(GenomicRanges)
+library(plyranges)
+library(rtracklayer)
+library(Biostrings)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(ggseqlogo)
+```
+
+```{r}
+myTheme <- theme_bw() +
+    theme(axis.text = element_text(size = 10, colour="black"),
+          axis.title = element_text(size=12, colour="black"),
+          axis.ticks=element_line(color="black"),
+          axis.ticks.length=unit(.15, "cm"),
+          panel.border=element_rect(color="black", fill = NA),
+          panel.background = element_blank(),
+          plot.background = element_blank(),
+          plot.title = element_text(size=12),
+          legend.text = element_text(size=10),
+          legend.position = "none")
+```
+
+# Background
+
+USP39 binding behavior and local features of A5SS events should be analyzed.
+
+# Data
+
+Regulated and non-regulated A5SS events as well as USP39 binding sites are loaded
+from a RDS-Files. In addition, iCLIP crosslink events are loaded from BigWig-Files.
+
+```{r}
+A5SSranges <- readRDS("rds_files/A5SSranges.rds")
+nonRegulatedA5SSranges <- readRDS("rds_files/nonRegA5SSranges.rds")
+Xlinks_plus <- import("data/iCLIP/HEK293T_USP39_combined_L_plus.bw", as="Rle")
+Xlinks_minus <- import("data/iCLIP/HEK293T_USP39_combined_L_minus.bw", as="Rle")
+
+bindingSites <- readRDS("data/iCLIP/finalbindingSites.RDS")
+```
+
+# Definition of canonical and alternative splice sites
+
+In a first step, the canonical and alternative splice sites were defined for each
+A5SS event. For regulated events the canonical splice sites is the start position
+of the junction downregulated upon USP39 knockdown, while for non-regulated events
+it is the start position of the junction with the higher PSI value in the control
+condition. Events where the canonical splice site has a PSI < 0.5 in the control
+condition were not considered.
+
+```{r}
+# Regulated
+canonicalSS <- endoapply(A5SSranges, function(gr){
+    gr$exon_length <- width(gr)
+    gr %>% plyranges::slice(which.min(KD.CT_median_dpsi))
+}) %>% unlist %>% resize(., 1, fix="end")
+
+alternativeSS <- endoapply(A5SSranges, function(gr){
+    gr$exon_length <- width(gr)
+    gr %>% plyranges::slice(which.max(KD.CT_median_dpsi))
+}) %>% unlist %>% resize(., 1, fix="end")
+
+# Non-regulated
+nonRegCanonicalSS <- endoapply(nonRegulatedA5SSranges, function(gr){
+    gr$exon_length <- width(gr)
+    gr %>% plyranges::slice(which.max(CT_median_psi))
+}) %>% unlist %>% resize(., 1, fix="end")
+
+nonRegAlternativeSS <- endoapply(nonRegulatedA5SSranges, function(gr){
+    gr$exon_length <- width(gr)
+    gr %>% plyranges::slice(which.min(CT_median_psi))
+}) %>% unlist %>% resize(., 1, fix="end")
+
+# Events where the down-regulated junction has a PSI > 0.5
+eventsToKeep <- canonicalSS$event_id[canonicalSS$CT_median_psi > 0.5]
+canonicalSS <- canonicalSS %>% plyranges::filter(event_id %in% eventsToKeep)
+alternativeSS <- alternativeSS %>% plyranges::filter(event_id %in% eventsToKeep)
+
+eventsToKeep <- nonRegCanonicalSS$event_id[nonRegCanonicalSS$CT_median_psi > 0.5]
+nonRegCanonicalSS <- nonRegCanonicalSS %>% plyranges::filter(event_id %in% eventsToKeep)
+nonRegAlternativeSS <- nonRegAlternativeSS %>% plyranges::filter(event_id %in% eventsToKeep)
+```
+
+# RNAmaps
+
+At first, a -50 to +300 nt window around the canonical and alternative 5' splice
+sites is opened. Next, crosslink events are determined for the 351 nt windows.
+Finally, the signal in each window is min-max normalized ( (x-min)/(max-min) ).
+
+```{r}
+
+minMaxNorm <- function(mat){
+    mat <- apply(mat, 1, function(row){
+        (row-min(row, na.rm=TRUE))/ (max(row, na.rm=TRUE)-min(row, na.rm=TRUE))
+        }) %>% t
+    mat[is.nan(mat)] <- 0
+    return(mat)
+}
+
+create_matrix <- function(gr){
+    
+    window <- gr %>% promoters(., upstream = 50, downstream=301)
+    
+    window_plus <- window[strand(window) == "+"]
+    window_minus <- window[strand(window) == "-"]
+    
+    windowXlinks_plus <- Xlinks_plus[window_plus] %>% as.matrix
+    rownames(windowXlinks_plus) <- window_plus$exon
+    windowXlinks_minus <- Xlinks_minus[window_minus] %>% as.matrix
+    rownames(windowXlinks_minus) <- window_minus$exon
+    windowXlinks_minus <- windowXlinks_minus[,ncol(windowXlinks_minus):1]
+    windowXlinks <- rbind(windowXlinks_plus, windowXlinks_minus)
+
+    windowXlinks_smoothed <- minMaxNorm(windowXlinks)
+    
+    return(windowXlinks_smoothed)
+}
+
+canonicalMatrix <- create_matrix(canonicalSS)
+alternativeMatrix <- create_matrix(alternativeSS)
+nonRegCanonicalMatrix <- create_matrix(nonRegCanonicalSS)
+nonRegAlternativeMatrix <- create_matrix(nonRegAlternativeSS)
+```
+
+To idenify regions with significant differences between regulated and non-regulated 
+splice sites, a 10 nt sliding window is moved through each 351 nt window and 
+the signal averaged for each window position. The signals at each window position
+are then compared between regulated and non-regulated splice sites with a Wilcoxon
+rank sum test, followed by BH FDR correction. Positions were considered as 
+significant if the FDR was $\le$ 0.025.
+
+```{r}
+get_significant_bins <- function(mat1, mat2){
+    
+    binSize <- 10
+    
+    # Determine significant bins for each of the four splice sites
+    
+    # 10 nt bins are defined and the average signal determined for each
+    #   CE event. Averages are compared between cooperatively regulated
+    #   and the matched non-regulated CEe events using wilcox.test, followed
+    #   by FDR correction
+    FDR <- sapply(1:(351-binSize+1), function(i){
+        wilcox.test(mat1[,i:(i+binSize-1)] %>% rowMeans(., na.rm = T),
+                    mat2[,i:(i+binSize-1)] %>% rowMeans(., na.rm = T),
+                    alternative="greater")$p.value}) %>%
+        p.adjust(., method = "BH")
+    
+    # Final data.frame contains all significant bins (FDR <= 0.01)
+    significantBins <- data.frame(
+        binStart = 1:(351-binSize+1),
+        binEnd = 1:(351-binSize+1)+(binSize-1),
+        FDR = FDR
+    ) %>% dplyr::filter(FDR <= 0.025)
+    
+    return(significantBins)
+} 
+
+significantBinsCanonical <- get_significant_bins(canonicalMatrix, nonRegCanonicalMatrix)
+significantBinsAlternative <- get_significant_bins(alternativeMatrix, nonRegAlternativeMatrix)
+
+significantBinsCanonical$type <- factor("canonical", levels=c("canonical", "alternative"))
+significantBinsAlternative$type <- factor("alternative", level=c("canonical", "alternative"))
+
+significantBins <- rbind(significantBinsCanonical, significantBinsAlternative)
+significantBins$binStart <- significantBins$binStart-51
+significantBins$binEnd <- significantBins$binEnd-51
+```
+
+In the next step, the signal at each position is summarized via colMeans() and
+the respective RNA splice Maps plotted. Significant 10nt windows are shown at
+the top.
+
+```{r fig.height=3, fig.width=6}
+
+p <- data.frame(pos=rep(-50:300, 4),
+                 signal=c(canonicalMatrix %>% colMeans,
+                          alternativeMatrix %>% colMeans,
+                          nonRegCanonicalMatrix %>% colMeans,
+                          nonRegAlternativeMatrix %>% colMeans),
+                 type=factor(
+                     c(rep("canonical", 351), rep("alternative", 351)),
+                     levels=c("canonical", "alternative")),
+                 regulated = c(rep(T, 351), rep(T, 351), rep(F, 351), rep(F, 351))) %>%
+    ggplot(., aes(x=pos, y=signal, col=regulated)) +
+        geom_line(alpha=0.4, size=.5) +
+        geom_smooth(se=FALSE, method = "loess", span = 0.1, size=1) +
+        facet_wrap(~type) +
+        scale_color_manual(values=c("TRUE"="#DC0000",
+                                    "FALSE" = "#444444")) +
+        scale_x_continuous(breaks=c(-50, 0, 100, 200, 300)) +
+        labs(x="Position relative to 5' splice site",
+             y="Normalized iCLIP signal") +
+        myTheme +
+        theme(legend.position = "bottom") 
+
+p <- p + geom_rect(data=significantBins,
+                   mapping=aes(xmin=binStart, xmax=binEnd,
+                               ymin=0.095, ymax=0.0975),
+                   fill="black", inherit.aes = FALSE,alpha=.25)
+p
+```
+
+# Binding sites
+
+## Logoplot
+
+All `r length(bindingSites)` binding sites are used for the generation of a 
+logo plot, which reflects the nucleotide composition at the binding sites.
+
+```{r fig.height=4}
+
+rss <-RNAStringSet(getSeq(Hsapiens, bindingSites+8))
+p <- ggplot() +
+    geom_logo(as.character(rss), seq_type="rna", method="bits") + 
+    scale_x_continuous(breaks = seq(1,21,2), labels = seq(-10, 10, 2)) +
+    labs(x="Position relative to binding site center", title = "All binding sites") +
+    myTheme +
+    theme(aspect.ratio = 1/1)
+p
+
+```
+
+## Tetramers around strong and weak binding sites
+
+To check for an enrichment of tetramers around strong binding sites, a +/- 50 nt
+window is opened around each binding site ceter, followed by the counting of all
+tetramers in the 101 nt window. 
+
+In the next step, the top20 and bottom20 binding sites (picked by strength) are 
+picked and for each set the mean tetramer frequency of each tetramer computed.
+These mean tetramer frequencies were used for the scatter plot shown below.
+
+```{r fig.height=4}
+bindingSites$rank <- cut(bindingSites$scoreMax,
+                         breaks=quantile(bindingSites$scoreMax,
+                                         probs=c(0, 0.2, 0.8, 1.0)),
+                         labels=c("bottom20%", "others", "top20%"),
+                         include.lowest = T)
+
+top20 <- (bindingSites %>% plyranges::filter(rank == "top20%"))+48
+bottom20 <- (bindingSites %>% plyranges::filter(rank == "bottom20%"))+48
+
+top20RSS <- RNAStringSet(getSeq(Hsapiens, top20))
+bottom20RSS <- RNAStringSet(getSeq(Hsapiens, bottom20))
+
+data.frame(top20 = oligonucleotideFrequency(top20RSS, 4) %>% colMeans(),
+           bottom20 = oligonucleotideFrequency(bottom20RSS, 4) %>% colMeans(),
+           tetramer = oligonucleotideFrequency(RNAStringSet(), 4) %>% colnames) %>%
+    mutate(tetramer = ifelse(abs(top20 - bottom20) < 0.15, "", tetramer)) %>%
+    ggplot(., aes(x=bottom20, y=top20)) +
+        geom_point(size=3) +
+        geom_abline(slope=1, intercept=0) +
+        geom_abline(slope=1, intercept=0.15, linetype="dashed", linewidth=.2) +
+        geom_abline(slope=1, intercept=-0.15, linetype="dashed", linewidth=.2) +
+        ggrepel::geom_label_repel(mapping=aes(x=bottom20, y=top20, label=tetramer), size=2, alpha=.8, inherit.aes = FALSE, max.overlaps=Inf, min.segment.length=.1, box.padding = .2, force=100) +
+        labs(x="Mean tetramer count for 20% weakest binding sites",
+             y="Mean tetramer count for 20% strongest binding sites",
+             title="Window of -50 to +50 nt around binding site center") +
+        coord_cartesian(xlim=c(0, 2.6), ylim=c(0, 2.6)) +
+        theme(plot.title = element_text(size = 10, hjust=.5)) +
+        guides(fill = guide_legend(title="Tetramer", title.position = "top", title.hjust = 0.5, ncol=2)) +
+        myTheme +
+        theme(aspect.ratio = 1/1)
+
+```
+
+# A5SS events and binding sites
+
+## Binding site assignment
+
+To check for close-by binding sites around canonical regulated and non-regulated
+alternative 5' splice sites, at first, the read support of the underlying event
+is loaded. Read support means the sum of junction counts for the two junctions
+of each event across the two control experiments.
+
+```{r}
+A5SSreadSupport <- readRDS("rds_files/A5SSreadSupport.rds")
+nonRegA5SSreadSupport <- readRDS("rds_files/nonRegA5SSreadSupport.rds")
+```
+
+```{r}
+assignOverlappingBindingSites <- function(gr, width, set) {
+    gr <- gr+width
+    gr$set <- set
+    gr$facet <- width
+    gr$nBSs <- countOverlaps(gr, bindingSites)
+    return(gr %>% as.data.frame)
+}
+```
+
+In the next step, the fraction of canonical 5' splice sites with at least one
+binding site overlapping a +/- 100 nt window around the splice sites is determined
+with respect to different read support cutoffs. The number of canonical splice 
+sites at each cutoff is shown for the regulated and non-regulated splice sites
+in a barchart.
+
+```{r fig.height = 7}
+
+assignOverlappingBindingSites <- function(gr, width, set, bindingSiteRegion) {
+    
+    if(bindingSiteRegion == "all"){
+        BSs <- bindingSites
+    } else if(bindingSiteRegion == "exonic"){
+        BSs <- bindingSites %>% plyranges::filter(region %in% c("CDS", "UTR5", "UTR3"))
+    } else {
+        BSs <- bindingSites %>% plyranges::filter(region == "Intron")
+    }
+    
+    if(set == "regulated"){
+        gr$readSupport <- A5SSreadSupport$readSupport[match(gr$event_id, A5SSreadSupport$event_id)]
+    } else {
+        gr$readSupport <- nonRegA5SSreadSupport$readSupport[match(gr$event_id, nonRegA5SSreadSupport$event_id)]
+    }
+    
+    gr <- gr+width
+    gr$set <- set
+    gr$facet <- width
+    
+    cutoffs <- seq(0,2000, 50)
+    lapply(cutoffs, function(cutoff){
+        tmpGR <- gr %>% plyranges::filter(gr$readSupport > cutoff)
+        withOverlap <- sum(countOverlaps(tmpGR, BSs) > 0)
+        data.frame(cutoff,
+                   total=length(tmpGR),
+                   withBS=withOverlap/length(tmpGR),
+                   width,
+                   set=factor(set, levels=c("regulated", "not regulated")))
+    }) %>% bind_rows()
+}
+
+
+plotDFallBSs <- rbind(
+    assignOverlappingBindingSites(canonicalSS, 50, "regulated", "all"),
+    assignOverlappingBindingSites(nonRegCanonicalSS, 50, "not regulated", "all"),
+    assignOverlappingBindingSites(canonicalSS, 100, "regulated", "all"),
+    assignOverlappingBindingSites(nonRegCanonicalSS, 100, "not regulated", "all"),
+    assignOverlappingBindingSites(canonicalSS, 250, "regulated", "all"),
+    assignOverlappingBindingSites(nonRegCanonicalSS, 250, "not regulated", "all"),
+    assignOverlappingBindingSites(canonicalSS, 500, "regulated", "all"),
+    assignOverlappingBindingSites(nonRegCanonicalSS, 500, "not regulated", "all")
+) 
+
+p1 <- plotDFallBSs %>%
+    dplyr::filter(width==100, cutoff <= 1000) %>%
+    ggplot(., aes(x=cutoff, y=total, fill=set)) +
+        geom_col(col="black") +
+        labs(x="", y="Canonical splice sites") +
+        facet_wrap(~set, nrow=2) +
+        scale_fill_manual(values=c("regulated" = "#DC0000",
+                                    "not regulated" = "#444444")) +
+        myTheme +
+        coord_cartesian(xlim=c(0,1000), ylim=c(0,1000)) +
+        theme(aspect.ratio=1/2,
+              axis.text.x = element_blank(),
+              axis.ticks.x = element_blank())
+
+p2 <- plotDFallBSs %>%
+    dplyr::filter(width==100, cutoff <= 1000) %>%
+    ggplot(., aes(x=cutoff, y=withBS, fill=set)) + 
+        geom_line() +
+        geom_point(pch=21, size=2, col="black") +
+        scale_fill_manual(values=c("regulated" = "#DC0000",
+                                    "not regulated" = "#444444")) +
+        labs(x="Read support cutoff", y="Fraction of canonical splice sites\nwith binding sites in window") +
+        coord_cartesian(ylim=c(0,0.3), xlim=c(0,1000)) +
+        myTheme +
+        theme(legend.position = "bottom",
+              aspect.ratio = 1)
+
+egg::ggarrange(p1, p2, nrow = 2)
+
+```
+
+The fraction of splice sites with an overlapping binding site when no cutoff
+is set is shown as stacked barchart.
+
+```{r}
+plotDFallBSs %>%
+    dplyr::filter(width==100, cutoff == 0) %>%
+    mutate(withoutBS = 1-withBS) %>%
+    pivot_longer(., cols=c("withBS", "withoutBS"), values_to="Fraction", names_to="hasBS") %>%
+    mutate(hasBS = factor(hasBS, levels=c("withoutBS", "withBS"))) %>%
+    ggplot(., aes(x=set, y=Fraction, fill=hasBS)) + 
+        geom_col(col="black") +
+        scale_fill_manual(values=c("withBS" = "black",
+                                   "withoutBS" = "darkgrey"),
+                          labels=c("withBS"= "TRUE",
+                                   "withoutBS" = "FALSE")) +
+        labs(x="", y="Fraction of canonical splice sites") +
+        guides(fill = guide_legend(title="Overlapping binding site in\n+/- 100nt window", title.position = "top", title.hjust = 0.5, ncol=2)) +
+        myTheme +
+        theme(aspect.ratio = 1.5/1,
+              legend.position="bottom")
+```
+
+The underlying data.frame for plotting is shown below.
+
+```{r}
+plotDFallBSs %>%
+    dplyr::filter(width==100, cutoff <= 1000) %>%
+    kable(., "html") %>%
+    kableExtra::kable_styling("striped") %>%
+    kableExtra::scroll_box(height="300px", width = "94%")
+```
+
+# A5SS events
+
+## Tetramer analysis around regulated and non-regulated canonical A5SSs
+
+Similar to the tetramer plot for strong against weak binding sites, a tetramer
+analysis was performed for regulated and non-regulated canonical splice sites by
+opening a +/ 50 nt window around the splice sites. Mean tetrameter frequencies
+were compared between regulated and non-regulated canonical splice sites.
+
+The top20 tetramers enriched for the regulated splice sites are marked in red and
+have a label attached. In addition, the 16 tetramers only containing Gs and Cs
+are shown in orange. These tetramers are all enriched for the set of non-regulated
+splice sites.
+
+```{r fig.height=5}
+
+delta <- 0.1
+
+canonicalWindow <- canonicalSS+50
+nonRegCanonicalWindow <- nonRegCanonicalSS+50
+
+canonicalWindowRSS <- RNAStringSet(getSeq(Hsapiens, canonicalWindow))
+nonRegCanonicalWindowRSS <- RNAStringSet(getSeq(Hsapiens, nonRegCanonicalWindow))
+
+tetramerDF <- data.frame(regulated = oligonucleotideFrequency(canonicalWindowRSS, 4) %>% colMeans(),
+                         nonRegulated = oligonucleotideFrequency(nonRegCanonicalWindowRSS, 4) %>% colMeans(),
+                         tetramer = oligonucleotideFrequency(RNAStringSet(), 4) %>% colnames) %>%
+    mutate(delta = regulated - nonRegulated) %>%
+    mutate(set = ifelse(delta >= 0, "regulated", "nonRegulated")) %>% 
+    group_by(set) %>%
+    arrange(desc(abs(delta))) %>%
+    mutate(id=1:dplyr::n()) %>%
+    ungroup 
+
+plotDF <- tetramerDF 
+
+plotDF$onlyGC = TRUE
+plotDF$onlyGC[grepl("A", plotDF$tetramer)] <- FALSE
+plotDF$onlyGC[grepl("U", plotDF$tetramer)] <- FALSE
+
+plotDF <- plotDF %>%
+    mutate(tetramer = ifelse(id > 20, "", tetramer)) %>%
+    mutate(tetramer = ifelse(set == "nonRegulated", "", tetramer))
+
+plotDF <- plotDF %>% mutate(enrichedInReg = ifelse(tetramer != "", T, F))
+
+
+p <- plotDF %>%
+    arrange(onlyGC) %>%
+    ggplot(., aes(x=nonRegulated, y=regulated, fill=onlyGC)) +
+        geom_point(mapping = aes(color=enrichedInReg), pch=21, size=3) +
+        geom_abline(slope=1, intercept=0) +
+        scale_color_manual(values=c("TRUE" = "red",
+                                    "FALSE" = "black")) +
+        scale_fill_manual(values=c("TRUE"="orange",
+                                    "FALSE" = "#444444")) +
+        ggrepel::geom_label_repel(mapping=aes(x=nonRegulated, y=regulated, label=tetramer), size=2, alpha=.8, inherit.aes = FALSE, max.overlaps=Inf, min.segment.length=.1, box.padding = .2, force=100) +
+        labs(x="Mean tetramer count for non-regulated 5' SSs",
+             y="Mean tetramer count for regulated 5' SSs") +
+        coord_cartesian(xlim=c(0, 1.05), ylim=c(0, 1.05)) +
+        theme(plot.title = element_text(size = 10, hjust=.5)) +
+        guides(fill = guide_legend(title="Only G and C in tetramer", title.position = "top", title.hjust = 0.5, ncol=2),
+               color = guide_legend(title="Top20 enriched around regulated", title.position = "top", title.hjust = 0.5, ncol=2)) +
+        myTheme +
+        theme(aspect.ratio = 1/1, 
+              legend.position = "bottom")
+
+p
+```
+
+The top20 enriched tetramers for the regulated and non-regulated splice sites were
+then used for the generation of a motif, by first making a multiple sequence 
+alignment and subsequently transfering the alignment into a logo plot.
+
+```{r fig.height=4}
+library(msa)
+library(ggseqlogo)
+
+p1 <- tetramerDF %>%
+    dplyr::filter(set == "regulated" & id <= 20) %>% pull(tetramer) %>% RNAStringSet() %>%
+    msaClustalW(inputSeqs = .) %>% 
+    {
+        ggplot() + geom_logo(as.character(.), seq_type="rna") +
+            coord_cartesian(ylim=c(0,2)) +
+            myTheme +
+            theme(panel.grid = element_blank(),
+                  panel.border = element_blank(),
+                  axis.line = element_line(colour = "black"),
+                  plot.title = element_text(size=8),
+                  aspect.ratio = 1/2) +
+            labs(title="Based on tetramers enriched around\nregulated canonical A5SSs")
+    }
+
+p2 <- tetramerDF %>% dplyr::filter(set == "nonRegulated" & id <= 20) %>% pull(tetramer) %>% RNAStringSet() %>%
+    msaClustalW(inputSeqs = .) %>% 
+    {
+        ggplot() + geom_logo(as.character(.), seq_type="rna") +
+            coord_cartesian(ylim=c(0,2)) +
+            myTheme +
+            theme(panel.grid = element_blank(),
+                  panel.border = element_blank(),
+                  axis.line = element_line(colour = "black"),
+                  plot.title = element_text(size=8),
+                  aspect.ratio = 1/2) +
+            labs(title="Based on tetramers enriched around\nnon-regulated canonical A5SSs")
+    }
+
+egg::ggarrange(p1, p2, nrow=2)
+```
+
+## Features
+
+As a final step, canonical and alternative splice sites as well as regulated
+and non-regulated splice sites were compared for their splice site strength. In
+addition, the intron length and intronic GC content was compared based on the canonical
+splice sites.
+
+<!-- Splice site strength -->
+
+```{r}
+library(VarCon)
+library(ggbeeswarm)
+calc_splicesite_strength <- function(gr, set, A5SS){
+    strengths <- gr %>%
+        flank(., 6, start = FALSE) %>% promoters(., upstream = 3, downstream = 6) %>%
+        getSeq(Hsapiens, .) %>%
+        as.character() %>%
+        VarCon::calculateMaxEntScanScore(., 5) %>%
+        as.numeric()   
+  
+    return(
+        data.frame(
+            set,
+            A5SS,
+            strength = strengths,
+            event_id = gr$event_id,
+            exon=gr$exon
+        )
+    )
+}
+
+
+spliceSiteStrengthDF <- rbind(
+    calc_splicesite_strength(canonicalSS, "regulated", "canonical"),
+    calc_splicesite_strength(alternativeSS, "regulated", "alternative"),
+    calc_splicesite_strength(nonRegCanonicalSS, "non-regulated", "canonical"),
+    calc_splicesite_strength(nonRegAlternativeSS, "non-regulated", "alternative")
+)
+
+p_splicesite_strength1 <- spliceSiteStrengthDF %>%
+    ggplot(., aes(x=set, y=strength)) +
+        ggrastr::rasterise(geom_quasirandom(color="darkgrey"), dpi=300) +
+        geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+        facet_wrap(~A5SS, ncol=2) +
+        coord_cartesian(ylim=c(-35,15)) +
+        ggpubr::stat_compare_means(label.y = 14, size=3) +
+        labs(y="Splice site strength") +
+        myTheme +
+        theme(aspect.ratio = 1.5/1,
+              axis.text.x = element_text(angle=45, hjust = 1, vjust=1))
+
+p_splicesite_strength2 <- spliceSiteStrengthDF %>%
+    ggplot(., aes(x=A5SS, y=strength)) +
+        ggrastr::rasterise(geom_quasirandom(color="darkgrey"), dpi=300) +
+        geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+        facet_wrap(~set, ncol=2) +
+        coord_cartesian(ylim=c(-35,15)) +
+        ggpubr::stat_compare_means(label.y = 14, size=3) +
+        labs(y="Splice site strength") +
+        myTheme +
+        theme(aspect.ratio = 1.5/1,
+              axis.text.x = element_text(angle=45, hjust = 1, vjust=1))
+```
+
+<!-- Intron length -->
+
+```{r}
+
+introns <- endoapply(A5SSranges[names(A5SSranges) %in% canonicalSS$event_id], function(gr){
+    canonical <- canonicalSS$exon[canonicalSS$event_id == gr$event_id[1]]
+    gr <- gr %>% plyranges::filter(exon %in% c(canonical, "E2")) %>% gaps(., start=NA, end=NA)
+    gr$event_id <- gr$event_id[1]
+    gr$set <- "regulated"
+    gr$A5SS <- ifelse(canonical == "E1D", "distal", "proximal")
+    return(gr)
+}) %>% unlist
+
+nonRegIntrons <- endoapply(nonRegulatedA5SSranges[names(nonRegulatedA5SSranges) %in% nonRegCanonicalSS$event_id], function(gr){
+    canonical <- nonRegCanonicalSS$exon[nonRegCanonicalSS$event_id == gr$event_id[1]]
+    gr <- gr %>% plyranges::filter(exon %in% c(canonical, "E2")) %>% gaps(., start=NA, end=NA)
+    gr$event_id <- gr$event_id[1]
+    gr$set <- "non-regulated"
+    gr$A5SS <- ifelse(canonical == "E1D", "distal", "proximal")
+    return(gr)
+}) %>% unlist
+
+p_intron_length <- c(introns, nonRegIntrons) %>%
+    as.data.frame() %>%
+    ggplot(., aes(x=set, y=width)) +
+        ggrastr::rasterise(geom_quasirandom(color="darkgrey"), dpi=300) +
+        geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+        ggpubr::stat_compare_means(label.y = 6, size=3) +
+        scale_y_log10() +
+        labs(y="Intron length") +
+        myTheme +
+        theme(aspect.ratio=2/1,
+              axis.text.x = element_text(angle=45, hjust = 1, vjust=1))
+```
+
+<!-- Intron GC-content -->
+
+```{r}
+GCcont <- introns %>%
+    getSeq(Hsapiens, .) %>%
+    alphabetFrequency(., baseOnly=TRUE, as.prob = T) %>%
+    as.data.frame() %>%
+    dplyr::select(C,G) %>%
+    rowSums
+
+nonRegGCcont <- nonRegIntrons %>%
+    getSeq(Hsapiens, .) %>%
+    alphabetFrequency(., baseOnly=TRUE, as.prob = T) %>%
+    as.data.frame() %>%
+    dplyr::select(C,G) %>%
+    rowSums
+
+
+
+p_GC_content <- data.frame(set=c(rep("regulated", length(GCcont)), rep("non-regulated", length(nonRegGCcont))),
+                 GC = c(GCcont, nonRegGCcont),
+                 A5SS=c(introns$A5SS, nonRegIntrons$A5SS)) %>%
+    ggplot(., aes(x=set, y=GC)) +
+        ggrastr::rasterise(geom_quasirandom(color="darkgrey"), dpi=300) +
+        geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+        ggpubr::stat_compare_means(label.y = .9, size=3) +
+        labs(y="GC content") +
+        myTheme +
+        theme(aspect.ratio=2/1,
+              axis.text.x = element_text(angle=45, hjust = 1, vjust=1))
+
+```
+
+```{r fig.height=9}
+egg::ggarrange(
+    p_splicesite_strength1,
+    p_intron_length,
+    p_splicesite_strength2,
+    p_GC_content,
+    ncol=2,
+    widths=c(1,.5)
+)
+```
+
+# Session Information
+
+```{r}
+sessionInfo()
+```

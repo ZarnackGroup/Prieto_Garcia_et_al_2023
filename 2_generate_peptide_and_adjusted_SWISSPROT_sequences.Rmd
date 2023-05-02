@@ -1,0 +1,564 @@
+---
+title: "Generate peptide and adjusted SWISSPROT sequences"
+author:
+- name: Mario Keller
+  affiliation: Faculty of Biological Sciences, Goethe University Frankfurt
+output:
+  BiocStyle::html_document:
+      toc: TRUE
+      toc_float: TRUE
+      code_folding: hide
+  
+header-includes:
+- \makeatletter\renewcommand*{\fps@figure}{h}\makeatother
+- \usepackage{placeins}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE,
+                      results = TRUE, crop=NULL)
+```
+
+
+```{r}
+library(tidyverse)
+library(knitr)
+library(ggpubr)
+library(ggsci)
+library(ggpointdensity)
+library(viridis)
+library(patchwork)
+library(GenomicRanges)
+library(ggbeeswarm)
+library(rtracklayer)
+library(plyranges)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(Biostrings)
+
+```
+
+```{r}
+myTheme <- theme_bw() +
+    theme(axis.text = element_text(size = 14, colour="black"),
+          axis.title = element_text(size=16, colour="black"),
+          axis.ticks=element_line(color="black"),
+          axis.ticks.length=unit(.15, "cm"),
+          panel.border=element_rect(color="black", fill = NA),
+          panel.background = element_blank(),
+          plot.background = element_blank(),
+          legend.text = element_text(size=12),
+          legend.position = "none")
+```
+
+# Background 
+
+Based on the A5SS events responsive to USP39 knockdown SWISS-PROT sequences should
+be adjusted.
+
+# Data 
+
+A GRangesList comprising the A5SS events is loaded from ab RDS-File.
+
+```{r input}
+A5SSranges <- readRDS("rds_files/A5SSranges.rds")
+```
+
+In addition, I the Gencode v38 annotation is loaded and and all CDS exons
+extracted.
+
+```{r}
+anno <- import("data/gencode.v38.annotation.gff3")
+CDS <- anno %>% plyranges::filter(type=="CDS" & transcript_type == "protein_coding")
+```
+
+# Assignment of a single CDS reference exon
+
+The aim was to identify a reference CDS exon for each A5SS event that provides
+the phase for the translation. The shorter upstream exon (E1D) of each A5SS event
+serves as representative and was overlapped with all CDS exons. After checking
+for identical gene identifiers, a single matching CDS exon is extracted and used
+for extraction of the phase.
+
+```{r}
+
+E1Dranges <- endoapply(A5SSranges, function(gr){
+    gr <- gr[gr$exon == "E1D"]
+    return(gr)
+}) %>% unlist
+
+anyOverlaps <- findOverlaps(E1Dranges, CDS, type="any") %>% as.data.frame()
+
+phaseInfoRanges <- lapply(split(anyOverlaps, anyOverlaps$queryHits), function(df){
+    
+    gr1 <- E1Dranges[df$queryHits[1]]
+    
+    tmpCDS <- CDS[df$subjectHits]
+    
+    tmpCDS <- tmpCDS[tmpCDS$gene_id == gr1$gene_id]
+    
+    if(length(tmpCDS) == 0){return(data.frame())}
+    
+    phaseInfo <- tmpCDS %>%
+        as.data.frame(., stringsAsFactors=FALSE) %>%
+        dplyr::select(seqnames, strand, start, end, width, strand, type, phase, gene_id, gene_name) %>%
+        mutate(across(where(is.factor), as.character)) %>%
+        mutate(phase=factor(phase, levels=c(0,1,2))) %>%
+        count(seqnames, strand, start, end, phase, .drop=FALSE) %>% pivot_wider(., names_from=phase, values_from=n) %>%
+        rowwise() %>%
+        mutate(phaseSum=sum(c_across(5:7))) %>% 
+        ungroup
+    
+    gr2 <- phaseInfo %>% makeGRangesFromDataFrame(keep.extra.columns = T)
+    phaseInfo$length_overlap <- pintersect(rep(gr1, length(gr2)), gr2) %>% width
+    
+    phaseInfo <- phaseInfo %>% arrange(desc(length_overlap), desc(phaseSum)) %>% dplyr::slice(1)
+    phaseInfo$event_id <- gr1$event_id
+    phaseInfo$length_E1D <- gr1 %>% width
+    
+    return(phaseInfo)
+}) %>% bind_rows() %>% makeGRangesFromDataFrame(., keep.extra.columns = TRUE)
+
+
+#No Overlaps with CDS if in UTRs or non-protein_coding types
+```
+
+At first, the number of A5SS events with an assigned CDS exon is determined.
+Those events lacking a CDS are either located in RNA species other than
+protein-coding (e.g. lncRNAs) or located in 5' or 3' UTRs.
+
+```{r}
+data.frame(overlap=c(TRUE, FALSE), count=c(length(phaseInfoRanges), length(E1Dranges) - length(phaseInfoRanges))) %>%
+    arrange(overlap) %>%
+    ggpie::ggdonut(., group_key = "overlap", count_type = "count",
+        label_info = "all", label_type = "horizon", label_split = NULL,
+        label_size = 4, label_pos = "in", labal_threshold = 10,
+        donut.label.color = "black") +
+    scale_fill_npg(name="overlap with CDS exon") 
+```
+
+# Adjusting distal/proximal exon 5' ends
+
+5' ends of the upstream exons (E1D and E1P) were truncated such the phase is 0.
+
+```{r}
+# Adjust exon boundaries
+adjustedA5SSranges <- endoapply(A5SSranges, function(gr){
+    
+    if(!gr$event_id[1] %in% phaseInfoRanges$event_id){return(GRanges())}
+    
+    #print(gr$event_id[1])
+    
+    #Get matched CDS exon
+    grMatched <- phaseInfoRanges[phaseInfoRanges$event_id == gr$event_id[1]]
+    
+    #Remove nucleotides from matched CDS exon so the phase is 0
+    nucleotidesToRemove <- which.max(c(mcols(grMatched)[,1], mcols(grMatched)[,2], mcols(grMatched)[,3])) - 1
+    grMatched <- resize(grMatched, width = width(grMatched) - nucleotidesToRemove, fix="end")
+    
+    if(strand(gr) %>% as.character == "+" & start(gr[gr$exon == "E1D"]) <= start(grMatched)){
+        start(gr[gr$exon %in% c("E1D", "E1P")]) <- start(grMatched)
+    } else if(strand(gr) %>% as.character == "+" & start(gr[gr$exon == "E1D"]) > start(grMatched)){
+        
+        diff <- start(gr[gr$exon == "E1D"]) - start(grMatched)
+        nucleotidesToRemove <- 3 - diff %% 3
+        start(gr[gr$exon %in% c("E1D", "E1P")]) <- start(gr[gr$exon %in% c("E1D", "E1P")]) + nucleotidesToRemove
+        
+    } else if(strand(gr) %>% as.character == "-" & end(gr[gr$exon == "E1D"]) >= end(grMatched)){
+        end(gr[gr$exon %in% c("E1D", "E1P")]) <- end(grMatched)
+    } else if(strand(gr) %>% as.character == "-" & end(gr[gr$exon == "E1D"]) < end(grMatched)){
+        diff <- end(grMatched) - end(gr[gr$exon == "E1D"])
+        nucleotidesToRemove <- 3 - diff %% 3
+        end(gr[gr$exon %in% c("E1D", "E1P")]) <- end(gr[gr$exon %in% c("E1D", "E1P")]) - nucleotidesToRemove
+    }
+    return(gr)
+})
+```
+
+# Inference of peptide sequences
+
+First the nucleotide sequence of the E1D, E1P and E2 exon is extracted and
+subsequently E1D + E2 and E1P + E2 concatenated, followed by translation into AA
+sequences. If a stop codon (*) is located in the AA sequence, everything after
+the stop codon is removed. Peptide sequences together with additional information
+is stored in a data.frame.
+
+```{r}
+
+peptideDF <- lapply(adjustedA5SSranges, function(gr){
+    
+    if(length(gr) == 0){return(data.frame())}
+    
+    E1D_seq <- getSeq(Hsapiens, gr[gr$exon == "E1D"])
+    E1P_seq <- getSeq(Hsapiens, gr[gr$exon == "E1P"])
+    E2_seq <- getSeq(Hsapiens, gr[gr$exon == "E2"])
+    
+    E1D_E2_seq <- xscat(E1D_seq, E2_seq)
+    E1P_E2_seq <- xscat(E1P_seq, E2_seq)
+    
+    E1D_E2_AAseq <- translate(E1D_E2_seq, no.init.codon=TRUE) %>% as.character  # no.init.codon=TRUE as otherwise CTG will be M instead of L
+    E1P_E2_AAseq <- translate(E1P_E2_seq, no.init.codon=TRUE) %>% as.character 
+    
+    hasStopCodon <- grepl("*", c(E1D_E2_AAseq, E1P_E2_AAseq), fixed=T)
+    
+    E1D_E2_AAseq <- E1D_E2_AAseq %>% strsplit(., "*", fixed=TRUE) %>% sapply("[[", 1)
+    E1P_E2_AAseq <- E1P_E2_AAseq %>% strsplit(., "*", fixed=TRUE) %>% sapply("[[", 1)
+    #Speichern ob Stern da war
+    
+    return(
+        data.frame(
+            chr = seqnames(gr[1]) %>% as.character,
+            strand = strand(gr[1]) %>% as.character,
+            start_E1 = start(gr[match(c("E1D", "E1P"), gr$exon)]),
+            end_E1 = end(gr[match(c("E1D", "E1P"), gr$exon)]),
+            start_E2 = start(gr[match("E2", gr$exon)]),
+            end_E2 = end(gr[match("E2", gr$exon)]),
+            event_id = gr$event_id[1],
+            lsv_id = gr$lsv_id[1],
+            A5SS = c("Distal", "Proximal"),
+            psiCT = gr$CT_median_psi[match(c("E1D", "E1P"), gr$exon)],
+            psiKD = gr$KD_median_psi[match(c("E1D", "E1P"), gr$exon)],
+            dpsi = gr$KD.CT_median_dpsi[match(c("E1D", "E1P"), gr$exon)],
+            event_size = gr$event_size[1],
+            peptide_seq = c(E1D_E2_AAseq, E1P_E2_AAseq),
+            peptide_len = c(nchar(E1D_E2_AAseq), nchar(E1P_E2_AAseq)),
+            frame_shift = !(gr$event_size[match(c("E1D", "E1P"), gr$exon)] %% 3 == 0),
+            stop_codon = hasStopCodon
+    ))
+    
+}) %>% bind_rows()
+
+```
+
+# Matching genes and UNIPROT entries
+
+As the overall aim was the integration of the peptide sequences into existing
+SWISS-PROT entries, first the AnnotationHub package is used to access the EnsDB v105
+and extract the columns GENEID, SYMBOL, UNIPROTID and UNIPROTDB.
+
+```{r}
+
+library(AnnotationHub)
+ah <- AnnotationHub()
+
+ahDb <- query(ah, pattern = c("Homo Sapiens", "EnsDb"))
+ahDb_v105 <- ahDb[["AH98047"]]
+
+keys <- peptideDF$event_id %>% strsplit(., ".", fixed=T) %>% sapply(., "[[", 1) %>% unique
+
+mappingDF <- select(ahDb_v105, keys=keys, columns = c("SYMBOL", "UNIPROTID", "UNIPROTDB")) %>% na.omit %>% dplyr::filter(UNIPROTDB == "SWISSPROT") %>% distinct %>%
+    mutate(UNIPROTID=strsplit(UNIPROTID, ".", fixed=TRUE) %>% sapply(., "[[", 1))
+
+```
+
+In a next step, the SWISS-PROT protein sequences (downloaded from the UNIPROT website)
+are loaded from a FASTA-File, placed in a data.frame and subsetted to sequences
+originating from a gene with a regulated A5SS event.
+
+```{r}
+# Load Swissprot with isoforms
+uniprot <- Biostrings::readAAStringSet("/Users/mariokeller/projects/USP39/data/uniprot-compressed_true_download_true_format_fasta_includeIsoform_tr-2022.08.09-13.58.31.27.fasta")
+
+# Turn uniprot into data.frame and add columns
+uniprot <- data.frame(original_id = names(uniprot), aa_seq = uniprot %>% as.character) %>%
+    mutate(isoform_id = original_id %>% strsplit(., "|", fixed=TRUE) %>% sapply(., "[[", 2)) %>%
+    mutate(uniprot_id = isoform_id %>% strsplit(., "-", fixed=T) %>% sapply(., "[[", 1))
+
+# Subset uniprot to the matched proteins
+uniprot <- uniprot %>% dplyr::filter(uniprot_id %in% mappingDF$UNIPROTID)
+uniprot$gene_id <- mappingDF$GENEID[match(uniprot$uniprot_id, mappingDF$UNIPROTID)]
+```
+
+# Get peptide positions in SWISS-PROT sequences
+
+To incorporate protein alterations originating from A5SS events into SWISS-PROT
+sequences, the in silico translated peptides are aligned against the SWISS-PROT
+sequences of the same gene. For this purpose, first a self-defined substitution
+matrix is created, which scores each mismatch by -2 and each match by 1. Next, 
+each pair of peptides is aligned against each protein isoform using a "global-local"
+alignment.
+
+Only alignments are kept where: 
+
+* both peptides have the same alignment start in the isoform sequence
+* one of the peptides has a perfect match in the isoform sequence and the other
+peptide an internal deletion, internal insertion or a stop codon.
+
+```{r}
+
+data(BLOSUM50)
+
+mySubMat <- BLOSUM50
+mySubMat[mySubMat > -Inf] <- -2 # Maybe adjust to -3
+diag(mySubMat) <- 1
+colnames(mySubMat)[24] <- "U"
+rownames(mySubMat)[24] <- "U"
+
+integrationDF <- lapply(peptideDF$event_id %>% unique, function(eventID){
+    A5SS_peptides <- peptideDF %>% plyranges::filter(event_id == eventID) %>% arrange(A5SS) # 2 rows
+    uniprot_tmp <- uniprot %>% dplyr::filter(gene_id == eventID %>% strsplit(., ".", fixed=TRUE) %>% sapply(., "[[", 1)) # 1 or more rows
+    
+    if(nrow(uniprot_tmp) == 0){return(data.frame())} #e.g. ZNF598
+    
+    lapply(1:nrow(uniprot_tmp), function(i){
+        uniprot_tmp2 <- uniprot_tmp[i,]
+        
+        pA <- pairwiseAlignment(
+            pattern = A5SS_peptides %>% pull(peptide_seq) %>% AAStringSet(.), # 2
+            subject = uniprot_tmp2 %>% pull(aa_seq) %>% AAStringSet(.), # 1
+            substitutionMatrix = mySubMat,
+            type="global-local",
+            gapOpening=3, gapExtension=0.2
+            )
+        
+        alignmentRes <- data.frame(event_id = eventID,
+                                   lsv_id = A5SS_peptides$lsv_id,
+                                   A5SS = c("Distal", "Proximal"),
+                                   pattern_start = pattern(pA) %>% start,
+                                   pattern_end = pattern(pA) %>% end,
+                                   pattern_len = A5SS_peptides$peptide_len,
+                                   uniprot_isoform_id = uniprot_tmp2$isoform_id,
+                                   subject_start = subject(pA) %>% start,
+                                   subject_end = subject(pA) %>% end,
+                                   subject_len = uniprot_tmp2 %>% pull(aa_seq) %>% nchar,
+                                   identical = c(identical(pattern(pA[1]) %>% as.character(), subject(pA[1]) %>% as.character()),
+                                                 identical(pattern(pA[2]) %>% as.character(), subject(pA[2]) %>% as.character())),
+                                   insertion_within = c(any(insertion(pA[1]) %>% unlist %>% end != pattern(pA[1]) %>% end),
+                                                        any(insertion(pA[2]) %>% unlist %>% end != pattern(pA[2]) %>% end)),
+                                   deletion_within = c(any(deletion(pA[1]) %>% unlist %>% end != pattern(pA[1]) %>% end),
+                                                        any(deletion(pA[2]) %>% unlist %>% end != pattern(pA[2]) %>% end)),
+                                   n_insertion = insertion(pA) %>% lengths,
+                                   n_deletion = deletion(pA) %>% lengths,
+                                   n_mismatch = nmismatch(pA),
+                                   n_match = nmatch(pA),
+                                   stop_codon = A5SS_peptides %>% pull(stop_codon)
+                                   )
+        # Same start in SWISSPROT sequence and pattern starts at pos 1
+        if(identical(alignmentRes$subject_start[1], alignmentRes$subject_start[2]) &
+           all(alignmentRes$pattern_start == 1)
+           ){  
+            # One peptide needs perfect match
+            if(any(alignmentRes$identical)){
+                
+                # In the other peptide there is an internal deletion or insertion
+                if(
+                    (alignmentRes$identical[1] & any(alignmentRes[2, c("insertion_within", "deletion_within")] %>% as.logical)) |
+                    (alignmentRes$identical[2] & any(alignmentRes[1, c("insertion_within", "deletion_within")] %>% as.logical))
+                    ){
+                     alignmentRes$keep = TRUE
+                # No internal deletion or insertion in other peptide
+                } else {
+                    # The other peptide has a stop codon
+                    if(
+                        (alignmentRes$identical[1] & alignmentRes$stop_codon[2]) |
+                        (alignmentRes$identical[2] & alignmentRes$stop_codon[1])
+                        ){
+                        
+                        #Check the rare case that both are identical and the distal and the uniprot have a stop codon (should be removed)
+                        if(
+                            (all(alignmentRes$identical) & (!all(alignmentRes$stop_codon)) & any(alignmentRes$subject_end == alignmentRes$subject_len))
+                        ){
+                            alignmentRes$keep = FALSE
+                        } else {
+                            alignmentRes$keep = TRUE
+                        }
+                        
+                        
+                        
+                    # No stop codon => Either nonsens or cases where the downstream exon has two ORFs (interesting but we do not know what happens further downstream)
+                    } else {
+                        alignmentRes$keep = FALSE 
+                    }
+                }
+            # No peptide has a perfect match
+            } else {
+                alignmentRes$keep = FALSE
+            }
+        # Different start in SWISSPROT sequence
+        } else {
+            alignmentRes$keep = FALSE    
+            }
+        
+        return(alignmentRes)
+        
+        
+    }) %>% bind_rows()
+    
+}) %>% bind_rows()
+    
+
+integrationDF <- integrationDF %>% dplyr::filter(keep)
+
+#Add an identifier to each entry
+integrationDF$newID <- paste0(integrationDF$uniprot_isoform_id, "-", integrationDF$event_id, "-", integrationDF$A5SS)
+
+integrationDF$newID[integrationDF$identical & !integrationDF$stop_codon] <- integrationDF$uniprot_isoform_id[integrationDF$identical & !integrationDF$stop_codon] 
+integrationDF$newID[integrationDF$identical & integrationDF$stop_codon & (integrationDF$pattern_end == integrationDF$pattern_len) & (integrationDF$subject_end == integrationDF$subject_len)] <- integrationDF$uniprot_isoform_id[integrationDF$identical & integrationDF$stop_codon & (integrationDF$pattern_end == integrationDF$pattern_len) & (integrationDF$subject_end == integrationDF$subject_len)] 
+
+```
+
+# Integrate peptides into SWISSPROT sequences
+
+As a penultimate step the peptide sequences are inserted into the matching
+SWISS-PROT isoforms.
+
+```{r}
+finalSequences <- lapply(1:nrow(integrationDF), function(i){
+
+    peptide_seq <- peptideDF$peptide_seq[peptideDF$event_id == integrationDF$event_id[i] & peptideDF$A5SS == integrationDF$A5SS[i]]
+    SWISSPROT_seq <- uniprot$aa_seq[uniprot$isoform_id == integrationDF$uniprot_isoform_id[i]]
+    
+    insertion_start <- integrationDF$subject_start[i]
+    insertion_end <- integrationDF$subject_end[i]
+    stop_codon <- integrationDF$stop_codon[i]
+    
+    if(stop_codon){
+        new_SWISSPROT_seq <- paste0(substr(SWISSPROT_seq, 1, insertion_start-1), peptide_seq) 
+    } else {
+        new_SWISSPROT_seq <- paste0(substr(SWISSPROT_seq, 1, insertion_start-1), peptide_seq, substr(SWISSPROT_seq, insertion_end+1, nchar(SWISSPROT_seq))) 
+    }
+    
+    data.frame(
+        new_id = integrationDF$newID[i],
+        event_id = integrationDF$event_id[i],
+        A5SS = integrationDF$A5SS[i],
+        header = paste0(c(paste0("new_id = ", integrationDF$newID[i]),
+                          paste0("uniprot_isoform_id = ", integrationDF$uniprot_isoform_id[i]),
+                          paste0("event_id = ", integrationDF$event_id[i]),
+                          paste0("lsv_id = ", integrationDF$lsv_id[i]),
+                          paste0("A5SS = ", integrationDF$A5SS[i]),
+                          paste0("ct_psi = ", peptideDF$psiCT[peptideDF$event_id == integrationDF$event_id[i] & peptideDF$A5SS == integrationDF$A5SS[i]]),
+                          paste0("kd_psi = " ,peptideDF$psiKD[peptideDF$event_id == integrationDF$event_id[i] & peptideDF$A5SS == integrationDF$A5SS[i]]),
+                          paste0("dpsi = ", peptideDF$dpsi[peptideDF$event_id == integrationDF$event_id[i] & peptideDF$A5SS == integrationDF$A5SS[i]]),
+                          paste0("frameshift = ", peptideDF$frame_shift[peptideDF$event_id == integrationDF$event_id[i] & peptideDF$A5SS == integrationDF$A5SS[i]]),
+                          paste0("stop_codon = ", peptideDF$stop_codon[peptideDF$event_id == integrationDF$event_id[i] & peptideDF$A5SS == integrationDF$A5SS[i]]),
+                          paste0("length_orig = ",nchar(SWISSPROT_seq)),
+                          paste0("length_adj = ",nchar(new_SWISSPROT_seq))
+                          ),
+                        collapse=" | "),
+        new_SWISSPROT_seq
+    )
+}) %>% bind_rows()
+
+
+```
+
+# Create summary table for the A5SS events
+
+A summary table is created and stored as RDS-File.
+
+```{r}
+
+alreadyInSwissprot <- finalSequences$new_id[finalSequences$new_SWISSPROT_seq %in% uniprot$aa_seq]
+
+#Add the dPSI
+integrationDF <- left_join(integrationDF, peptideDF %>% dplyr::select(event_id, A5SS, dpsi), by = c("event_id", "A5SS"))
+
+
+distalDF <- integrationDF %>% dplyr::filter(A5SS == "Distal") %>% #distalDF <- integrationDF %>% dplyr::filter(A5SS == "Distal" & !(newID %in% cleanupDF$new_id)) %>%
+    mutate(inSwissprot = newID %in% alreadyInSwissprot) %>%
+    group_by(event_id) %>%
+    summarize(Distal = paste0(newID, collapse=","),
+              Distal_inSwissprot = paste0(inSwissprot, collapse=","),
+              dPSI_Distal = unique(dpsi))
+
+proximalDF <- integrationDF %>% dplyr::filter(A5SS == "Proximal") %>% # proximalDF <- integrationDF %>% dplyr::filter(A5SS == "Proximal" & !(newID %in% cleanupDF$new_id)) %>%
+    mutate(inSwissprot = newID %in% alreadyInSwissprot) %>%
+    group_by(event_id) %>%
+    summarize(Proximal = paste0(newID, collapse=","),
+              Proximal_inSwissprot = paste0(inSwissprot, collapse=","),
+              dPSI_Proximal = unique(dpsi))
+
+summaryDF <- inner_join(distalDF, proximalDF, by = c("event_id")) %>% relocate(Proximal, .after = Distal)
+summaryDF$gene_id <- summaryDF$event_id %>% strsplit(., "_", fixed=TRUE) %>% sapply(., "[[", 1)
+summaryDF <- left_join(summaryDF, CDS %>% as.data.frame %>% dplyr::select(gene_id, gene_name) %>% distinct, by=c("gene_id"))
+
+classificationDF <- readRDS("rds_files/classificationDF.rds")
+
+summaryDF <- left_join(summaryDF, classificationDF %>% dplyr::select(event_id, group)) %>% dplyr::rename(category=group)
+
+summaryDF <- summaryDF %>% dplyr::select(event_id, Distal, Distal_inSwissprot, dPSI_Distal, Proximal, Proximal_inSwissprot, dPSI_Proximal, gene_id, gene_name, category)
+
+```
+
+# Write output files
+
+In the final step the peptide sequencess as well as the adjusted SWISS-PROT
+isoform sequences are stored as FASTA-Files for further downstream analyses.
+In addition a a second summary table is stored as XLSX-File.
+
+```{r}
+
+peptideSequences <- peptideDF %>% rowwise() %>% mutate(header = paste(paste0("event_id = ", event_id),
+                                                           paste0("lsv_id = ", lsv_id),
+                                                           paste0("A5SS = ", A5SS),
+                                                           paste0("ct_psi = ", psiCT),
+                                                           paste0("kd_psi = " , psiKD),
+                                                           paste0("dpsi = ", dpsi),
+                                                           paste0("frameshift = ", frame_shift),
+                                                           paste0("stop_codon = ", stop_codon),
+                                                           paste0("peptide_len = ", peptide_len),
+                                                         sep = " | "))
+
+peptideSequences <- Biostrings::AAStringSet(peptideSequences$peptide_seq) %>% setNames(., peptideSequences$header)
+writeXStringSet(peptideSequences, "fasta_files/petptide_sequences.fasta")
+
+
+#regulation to new_id
+
+reg_to_new_id <- rbind(
+    summaryDF %>%
+        dplyr::select(Distal, dPSI_Distal, event_id) %>%
+        mutate(reg = ifelse(dPSI_Distal > 0, "up", "down"),
+               A5SS = "Distal") %>%
+        separate_rows(., 1, sep=",") %>%
+        dplyr::rename(new_id = Distal) %>%
+        dplyr::select(new_id, reg, event_id, A5SS),
+    summaryDF %>%
+        dplyr::select(Proximal, dPSI_Proximal, event_id) %>%
+        mutate(reg = ifelse(dPSI_Proximal > 0, "up", "down"),
+               A5SS = "Proximal") %>%
+        separate_rows(., 1, sep=",") %>%
+        dplyr::rename(new_id = Proximal) %>%
+        dplyr::select(new_id, reg, event_id, A5SS)
+)
+
+finalSequences <- left_join(finalSequences, reg_to_new_id, by=c("new_id", "event_id", "A5SS"))
+
+finalSequences <- finalSequences %>% dplyr::filter(!is.na(reg))
+
+upFASTA <- finalSequences %>% dplyr::filter(reg == "up")
+upFASTA <- Biostrings::AAStringSet(upFASTA$new_SWISSPROT_seq) %>% setNames(., upFASTA$header)
+writeXStringSet(upFASTA, "fasta_files/upregulated_isoforms.fasta")
+
+downFASTA <- finalSequences %>% dplyr::filter(reg == "down")
+downFASTA <- Biostrings::AAStringSet(downFASTA$new_SWISSPROT_seq) %>% setNames(., downFASTA$header)
+writeXStringSet(downFASTA, "fasta_files/downregulated_isoforms.fasta")
+
+regulatedFASTA <- Biostrings::AAStringSet(finalSequences$new_SWISSPROT_seq) %>% setNames(., finalSequences$header)
+writeXStringSet(regulatedFASTA, "fasta_files/regulated_isoforms.fasta")
+
+xlsx::write.xlsx2(summaryDF %>% as.data.frame, "xlsx_files/summary_A5SS_adjusted_Swissprot_sequences.xlsx", row.names=FALSE)
+
+
+# Files for FAS analysis
+fasDF <- summaryDF %>% dplyr::select(event_id, Distal, Proximal) %>% separate_rows(., 2:3, sep = ",")
+
+fasDF <- fasDF %>%
+    mutate(A5SS = "Distal") %>%
+    dplyr::rename(new_id = Distal) %>%
+    left_join(., finalSequences %>% dplyr::select(new_id, event_id, A5SS, header), by = c("new_id", "event_id", "A5SS")) %>%
+    dplyr::rename(Distal = new_id, Distal_header = header) %>%
+    mutate(A5SS = "Proximal") %>%
+    dplyr::rename(new_id = Proximal) %>%
+    left_join(., finalSequences %>% dplyr::select(new_id, event_id, A5SS, header), by = c("new_id", "event_id", "A5SS")) %>%
+    dplyr::rename(Proximal = new_id, Proximal_header = header) %>%
+    dplyr::select(Distal_header, Proximal_header)
+    
+write.table(fasDF, "tsv_files/FAS_pairing.tsv", col.names=TRUE, row.names = FALSE, sep="\t", quote=FALSE)
+```
+
+# Session Information
+
+```{r}
+sessionInfo()
+```
