@@ -275,7 +275,7 @@ big_results_table <- cbind(results_dataframe,
 # output of the data to an excel sheet
 
 # name of the output file
-excel_file <- "data/DESeq2_results/Zebrafish_deseq2.xlsx"
+excel_file <- "data/DESeq2_results/Mouse_deseq2.xlsx"
 
 # Write the dataframe to an Excel file
 write.xlsx(big_results_table, excel_file, sheetName = "Sheet1", rowNames = TRUE)
