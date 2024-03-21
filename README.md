@@ -16,7 +16,7 @@ R-Scripts and Rmarkdown reports have to be executed in the following order:
 These first rendered HTML-Reports can be accessed at https://mchicken1988.github.io/Prieto_Garcia_et_al_2023/
 
 
-## figure 1 and s4 code
+## Figure 1 and S4 code
 before running data folder needs to be added
 - 06_modulize_to_regulated_a5ss_rds.R
 - 07_modulize_to_regulated_granges_rds.R
