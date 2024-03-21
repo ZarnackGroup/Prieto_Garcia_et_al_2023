@@ -1,0 +1,135 @@
+---
+title: "HeLa"
+author: "Felix Haidle & Mario Keller"
+output:
+  BiocStyle::html_document:
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This HeLa data set is part of the research on the effect of USP39 knockouts on splicing expression.
+
+
+# Raw Data Procession
+
+Raw data was deposited in the GEO database with the accession number:
+
+
+## Read Mapping
+
+RNAStar has been used to align the reads to the reference genome
+the reference genome used was the GRCh38 version 38
+
+command structure for this dataset:
+```{bash,eval=FALSE}
+STAR
+--runMode alignReads
+--outSAMattributes All
+--outSAMtype BAM SortedByCoordinate
+--outFilterMismatchNmax 999
+--readFilesCommand zcat
+--outFilterMultimapNmax 1
+--outFilterMismatchNoverLmax 0.04
+```
+
+## Splicing analysis
+
+"MAJIQ" was used to identify splicing events. Note that we removed one of the samples following quality control.
+
+Build command:
+```{bash,eval=FALSE}
+#FILES AND DIRS
+GFF3="/share/project/michaela/clara/annotation/human/gencode.v38.annotation.gff3"
+CONFIGFILE="/share/project/zarnack/mario/projects/USP39/config_file"
+OUTDIR="/share/project/zarnack/mario/projects/USP39/build"
+
+#CREATE OUTDIR
+mkdir $OUTDIR
+
+#MAJIQ - BUILD
+majiq build $GFF3 \
+-c $CONFIGFILE \
+-j $SLURM_CPUS_PER_TASK \
+-o $OUTDIR
+```
+the config file was: 
+
+```{bash,eval=FALSE}
+[info]
+bamdirs=/share/project/michaela/clara/project/USP39_dikic/majiq/WT,/share/project/michaela/clara/project/USP39_dikic/majiq/KD
+genome=GRCh38
+strandness=reverse
+[experiments]
+CT=H_ctrl1Aligned.sortedByCoord.out,H_ctrl2Aligned.sortedByCoord.out
+KD=H_KD39_1Aligned.sortedByCoord.out,H_KD39_2Aligned.sortedByCoord.out,H_KD39_3Aligned.sortedByCoord.out
+
+```
+
+
+
+to evaluate changings between groups "majiq deltapsi" was used
+
+```{bash,eval=FALSE}
+   #FILES AND DIRS
+BUILDDIR="/share/project/zarnack/mario/projects/USP39/build"
+OUTDIR="/share/project/zarnack/mario/projects/USP39/deltapsi"
+
+mkdir $OUTDIR
+
+majiq deltapsi \
+-grp1 \
+"${BUILDDIR}/H_ctrl1Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/H_ctrl2Aligned.sortedByCoord.out.majiq" \
+-grp2 \
+"${BUILDDIR}/H_KD39_1Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/H_KD39_2Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/H_KD39_3Aligned.sortedByCoord.out.majiq" \
+-j $SLURM_CPUS_PER_TASK \
+--output-type voila \
+-o $OUTDIR \
+-n CT KD
+```
+
+
+
+
+to identify specific event types modulize was used
+```{bash,eval=FALSE}
+#FILES AND DIRS
+DELTAPSIDIR="/share/project/zarnack/mario/projects/USP39/deltapsi"
+OUTDIR="/share/project/zarnack/mario/projects/USP39/modulize"
+
+SPLICEGRAPH="/share/project/zarnack/mario/projects/USP39/build/splicegraph.sql"
+VOILAFILES=$(echo "${DELTAPSIDIR}/*.voila")
+
+mkdir $OUTDIR
+
+voila modulize \
+--changing-between-group-dpsi 0.05 \
+--non-changing-between-group-dpsi 0.02 \
+--changing-between-group-dpsi-secondary 0.025 \
+--probability-changing-threshold 0.9 \
+--probability-non-changing-threshold 0.5 \
+--show-all \
+-j $SLURM_CPUS_PER_TASK \
+-d $OUTDIR \
+$SPLICEGRAPH $VOILAFILES
+```
+
+
+# DESeq2 Analysis
+
+"We used htseq-count to count reads into exons using default parameters, and count tables were used as input for differential gene expression analysis with DESeq2 v1.22.2." - Mario Keller
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
