@@ -1,0 +1,657 @@
+---
+title: "figures_garcia_et_al"
+author: "Felix Haidle"
+output:
+  BiocStyle::html_document:
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r libraries, warning=FALSE,message=FALSE,echo=TRUE}
+
+# loading libraries
+library(dplyr)
+library(ggvenn)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(BSgenome.Mmusculus.UCSC.mm39)
+library(GenomicRanges)
+library(ggplot2)
+library(ggsci)
+library(ggrastr)
+library(ggbeeswarm)
+library(viridis)
+
+# found in the utility folders
+source("./utility/majiq_analysis_functions.R")
+```
+
+
+# Figure 1
+
+## D
+
+Regulated Splice Events in the HeLa datset. Regulation criteriea is explained in the methods part of the paper.
+
+```{r HeLa splice Analysis,warning=FALSE,message=FALSE,message=FALSE}
+
+
+# reading in modulize output
+ASeventList <- loadTSVs("./data/modulize/HeLa")
+
+# getting the amount of events for each type
+eventFrequencies <- lapply(ASeventList, function(df){df$event_id %>% unique %>% length})
+
+eventFrequencies <- eventFrequencies %>%
+  as.data.frame()  %>%
+  pivot_longer(., cols=everything(), names_to="ASevent", values_to = "Frequency")
+
+
+# filtering out the signifcant events
+significant_events <- identifySignificantEvents(ASeventList)
+
+# amount of events filtered
+regulatedEventFrequencies <- significant_events %>%
+    dplyr::count(eventClass, name="Frequency")
+
+
+# interesting event types, the other ones are put into the category "other"
+eventsOfInterest <- c("cassette", "alternative_intron", "multi_exon_spanning",
+                      "alternate_first_exon", "alternate_last_exon",
+                      "alt5prime", "alt3prime", "other")
+
+regulatedEventFrequencies <- regulatedEventFrequencies %>%
+    add_row(
+        regulatedEventFrequencies %>% filter(!eventClass %in% eventsOfInterest)  %>%
+            summarise(eventClass="other", Frequency = sum(Frequency)) %>%
+            select(eventClass, Frequency)
+) %>% filter(., eventClass %in% eventsOfInterest) %>%
+    mutate(eventClass=factor(eventClass, levels=rev(eventsOfInterest)))
+
+
+
+custom_palette <- c("#999999", "#888888", "#777777", "#666666", "#555555", "#444444", "#333333", "#222222")
+
+# building a bar plot from the data
+regulatedEventFrequencies %>%
+    mutate(eventClass=factor(eventClass)) %>%
+    arrange(eventClass) %>%
+    dplyr::rename(count="Frequency") %>%
+    ggplot(aes(x=eventClass, y=count, fill=eventClass)) +
+    geom_bar(stat="identity") +
+    scale_fill_manual(values = custom_palette) +  # Using grayscale color palette
+    labs(x = "Event Class", y = "Frequency") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+
+
+## F
+
+Annotation status of the down and up regulated junctions.
+
+```{r}
+
+# adding a colum to the data that indicates for each event wether it is regulated and if so if it is up or down regulated
+modulize_regulated <- ASeventList[[3]] %>% select(event_id, junction_name, CT_median_psi, KD_median_psi, KD.CT_median_dpsi, denovo) %>%
+  mutate(regulation = case_when((event_id %in% significant_events$event_id) & KD.CT_median_dpsi > 0 ~ "up",
+                                  (event_id %in% significant_events$event_id) & KD.CT_median_dpsi < 0 ~ "down",
+                                  ((!event_id %in% significant_events$event_id)) ~ "no")) %>% 
+    mutate(regulation=factor(regulation, levels=c("no", "down", "up")))
+
+# renaming and grouping the regulated events by annotation status
+current_df <- modulize_regulated  %>%
+    dplyr::filter(regulation %in% c("up", "down")) %>%
+    dplyr::rename(annotated = denovo) %>%
+    mutate(annotated=ifelse(annotated == "True", "No", "Yes")) %>% 
+    group_by(regulation) %>% 
+    summarize(Yes=sum(annotated == "Yes") / n(),
+              No=sum(annotated == "No") / n()) %>%
+    pivot_longer(cols=2:3, names_to="annotated", values_to = "fraction")
+
+
+# plotting the annotation/regulaiton status
+plot <-ggplot(current_df, aes(x=regulation, y=fraction, fill=annotated)) +
+    geom_col() +
+    scale_fill_manual(values=c("No" = "grey", "Yes" = "black")) +
+    labs(x="Regulation of junction in knockdown",
+         y="Fraction of junctions") +
+     theme(legend.position = "right") + ggtitle("distribution")
+  plot
+  
+```
+
+
+## G
+
+comparison of the max ent scan scores
+
+```{r max ent scores HeLa, warning=FALSE}
+
+# in case this code has already been run hte splice strength data frame is loaded otherwise it will be created and saved in the data folder
+rds_path <- ("./data/rds_objects/HeLa_SSDF.rds")
+if (!file.exists(rds_path)) {
+  # read in regulated a5ss event granges objects
+  HeLa_regulated <- readRDS("./data/rds_objects/HeLa_A5SSranges.rds")
+ 
+  # read in not regulated a5ss event granges objects
+  HeLa_not_regulated <- readRDS("./data/rds_objects/HeLa_nonRegA5SSranges.rds")
+  
+  A5SSranges <- HeLa_regulated
+  nonRegulatedA5SSranges <- HeLa_not_regulated
+  
+  # procession of the granges objects
+  # regulated
+  canonicalSS <- endoapply(A5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.min(KD.CT_median_dpsi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  alternativeSS <- endoapply(A5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.max(KD.CT_median_dpsi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  # Non-regulated
+  nonRegCanonicalSS <- endoapply(nonRegulatedA5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.max(CT_median_psi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  nonRegAlternativeSS <- endoapply(nonRegulatedA5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.min(CT_median_psi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+    
+    
+  # function to calculate the splice site strength  
+  calc_splicesite_strength <- function(gr, set, A5SS){
+  strengths <- gr %>%
+        flank(., 6, start = FALSE) %>% promoters(., upstream = 3, downstream = 6) %>%
+        getSeq(Hsapiens, .) %>%
+        as.character() %>%
+        VarCon::calculateMaxEntScanScore(., 5) %>%
+        as.numeric()   
+  
+  return(
+        data.frame(
+            set,
+            A5SS,
+            strength = strengths,
+            event_id = gr$event_id,
+            exon=gr$exon,
+            splice_coordinate=start(gr)
+        )
+      )
+    
+    }
+    
+   # filtering the events 
+    eventsToKeep <- canonicalSS$event_id[canonicalSS$CT_median_psi > 0.5]
+  canonicalSS <- canonicalSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  alternativeSS <- alternativeSS %>% plyranges::filter(event_id %in% eventsToKeep)
+
+  eventsToKeep <- nonRegCanonicalSS$event_id[nonRegCanonicalSS$CT_median_psi > 0.5]
+  nonRegCanonicalSS <- nonRegCanonicalSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  nonRegAlternativeSS <- nonRegAlternativeSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  
+  
+  # combining the scores in to one data frame
+  spliceSiteStrengthDF <- rbind(
+    calc_splicesite_strength(canonicalSS, "regulated", "canonical"),
+    calc_splicesite_strength(alternativeSS, "regulated", "alternative"),
+    calc_splicesite_strength(nonRegCanonicalSS, "non-regulated", "canonical"),
+    calc_splicesite_strength(nonRegAlternativeSS, "non-regulated", "alternative")
+    )
+  saveRDS(spliceSiteStrengthDF,rds_path)
+} else {
+  # Load the dataframe from the RDS object
+  spliceSiteStrengthDF <- readRDS(file = rds_path)
+}
+
+
+# plotting the max ent scores
+p_splicesite_strength1 <- spliceSiteStrengthDF %>%
+    ggplot(., aes(x=A5SS, y=strength)) +
+        ggrastr::rasterise(geom_quasirandom(color="darkgrey"), dpi=300) +
+        geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+        facet_wrap(~set, ncol=2) +
+        coord_cartesian(ylim=c(-35,15)) +
+        ggpubr::stat_compare_means(label.y = 14, size=3) +
+        labs(y="Splice site strength") +
+        theme(aspect.ratio = 1.5/1,
+              axis.text.x = element_text(angle=45, hjust = 1, vjust=1))
+p_splicesite_strength1
+```
+
+
+
+
+
+
+
+# Figure S4
+
+## RPE1
+Regulated Splice Events in the RPE datset. Regulation criterea is explained in the methods part of the paper.
+
+```{r RPE splice Analysis,warning=FALSE,message=FALSE}
+
+# reading in modulize output
+ASeventList <- loadTSVs("./data/modulize/RPE")
+
+# getting the amount of events for each type
+eventFrequencies <- lapply(ASeventList, function(df){df$event_id %>% unique %>% length})
+
+eventFrequencies <- eventFrequencies %>%
+  as.data.frame()  %>%
+  pivot_longer(., cols=everything(), names_to="ASevent", values_to = "Frequency")
+
+# filtering out the signifcant events
+significant_events <- identifySignificantEvents(ASeventList)
+
+# amount of events filtered
+regulatedEventFrequencies <- significant_events %>%
+    dplyr::count(eventClass, name="Frequency")
+
+eventsOfInterest <- c("cassette", "alternative_intron", "multi_exon_spanning",
+                      "alternate_first_exon", "alternate_last_exon",
+                      "alt5prime", "alt3prime", "other")
+
+# interesting event types, the other ones are put into the category "other"
+regulatedEventFrequencies <- regulatedEventFrequencies %>%
+    add_row(
+        regulatedEventFrequencies %>% filter(!eventClass %in% eventsOfInterest)  %>%
+            summarise(eventClass="other", Frequency = sum(Frequency)) %>%
+            select(eventClass, Frequency)
+) %>% filter(., eventClass %in% eventsOfInterest) %>%
+    mutate(eventClass=factor(eventClass, levels=rev(eventsOfInterest)))
+
+
+custom_palette <- c("#999999", "#888888", "#777777", "#666666", "#555555", "#444444", "#333333", "#222222")
+
+# building a bar plot from the data
+regulatedEventFrequencies %>%
+    mutate(eventClass=factor(eventClass)) %>%
+    arrange(eventClass) %>%
+    dplyr::rename(count="Frequency") %>%
+    ggplot(aes(x=eventClass, y=count, fill=eventClass)) +
+    geom_bar(stat="identity") +
+    scale_fill_manual(values = custom_palette) +  # Using grayscale color palette
+    labs(x = "Event Class", y = "Frequency") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```
+
+
+Annotation status of the down and up regulated junctions.
+
+```{r}
+#  adding a column to the data that indicates for each event wether it is regulated and if so if it is up or down regulated
+modulize_regulated <- ASeventList[[3]] %>% select(event_id, junction_name, CT_median_psi, KO_median_psi, KO.CT_median_dpsi, denovo) %>%
+  mutate(regulation = case_when((event_id %in% significant_events$event_id) & KO.CT_median_dpsi > 0 ~ "up",
+                                  (event_id %in% significant_events$event_id) & KO.CT_median_dpsi < 0 ~ "down",
+                                  ((!event_id %in% significant_events$event_id)) ~ "no")) %>% 
+    mutate(regulation=factor(regulation, levels=c("no", "down", "up")))
+
+
+# renaming and grouping the regulated events by annotation status
+current_df <- modulize_regulated  %>%
+    dplyr::filter(regulation %in% c("up", "down")) %>%
+    dplyr::rename(annotated = denovo) %>%
+    mutate(annotated=ifelse(annotated == "True", "No", "Yes")) %>% 
+    group_by(regulation) %>% 
+    summarize(Yes=sum(annotated == "Yes") / n(),
+              No=sum(annotated == "No") / n()) %>%
+    pivot_longer(cols=2:3, names_to="annotated", values_to = "fraction")
+
+# plotting the annotation/regulation status
+plot <-ggplot(current_df, aes(x=regulation, y=fraction, fill=annotated)) +
+    geom_col() +
+    scale_fill_manual(values=c("No" = "grey", "Yes" = "black")) +
+    labs(x="Regulation of junction in knockdown",
+         y="Fraction of junctions") +
+     theme(legend.position = "right") + ggtitle("distribution")
+  plot
+  
+```
+
+
+comparison of the max ent scan scores
+
+```{r max ent scores RPE, warning=FALSE}
+# in case this code has already been run the splice strength data frame is loaded otherwise it will be created and saved in the data folder
+rds_path <- ("./data/rds_objects/RPE_SSDF.rds")
+if (!file.exists(rds_path)) {
+  # read in regulated a5ss event granges objects
+  RPE_regulated <- readRDS("./data/rds_objects/RPE_A5SSranges.rds")
+ 
+  # read in not regulated a5ss event granges objects
+  RPE_not_regulated <- readRDS("./data/rds_objects/RPE_nonRegA5SSranges.rds")
+  
+  A5SSranges <- RPE_regulated
+  nonRegulatedA5SSranges <- RPE_not_regulated
+  
+  # procession of the granges objects
+  # regulated
+  canonicalSS <- endoapply(A5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.min(KO.CT_median_dpsi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  alternativeSS <- endoapply(A5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.max(KO.CT_median_dpsi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  # Non-regulated
+  nonRegCanonicalSS <- endoapply(nonRegulatedA5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.max(CT_median_psi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  nonRegAlternativeSS <- endoapply(nonRegulatedA5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.min(CT_median_psi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+    
+    
+  # function to calculate the splice site strength  
+  calc_splicesite_strength <- function(gr, set, A5SS){
+  strengths <- gr %>%
+        flank(., 6, start = FALSE) %>% promoters(., upstream = 3, downstream = 6) %>%
+        getSeq(Hsapiens, .) %>%
+        as.character() %>%
+        VarCon::calculateMaxEntScanScore(., 5) %>%
+        as.numeric()   
+  
+  return(
+        data.frame(
+            set,
+            A5SS,
+            strength = strengths,
+            event_id = gr$event_id,
+            exon=gr$exon,
+            splice_coordinate=start(gr)
+        )
+      )
+    
+    }
+    
+  # filtering the events
+  eventsToKeep <- canonicalSS$event_id[canonicalSS$CT_median_psi > 0.5]
+  canonicalSS <- canonicalSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  alternativeSS <- alternativeSS %>% plyranges::filter(event_id %in% eventsToKeep)
+
+  eventsToKeep <- nonRegCanonicalSS$event_id[nonRegCanonicalSS$CT_median_psi > 0.5]
+  nonRegCanonicalSS <- nonRegCanonicalSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  nonRegAlternativeSS <- nonRegAlternativeSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  
+  # combining the scores in to one data frame
+  spliceSiteStrengthDF <- rbind(
+    calc_splicesite_strength(canonicalSS, "regulated", "canonical"),
+    calc_splicesite_strength(alternativeSS, "regulated", "alternative"),
+    calc_splicesite_strength(nonRegCanonicalSS, "non-regulated", "canonical"),
+    calc_splicesite_strength(nonRegAlternativeSS, "non-regulated", "alternative")
+    )
+  saveRDS(spliceSiteStrengthDF,rds_path)
+} else {
+  # Load the dataframe from the RDS object
+  spliceSiteStrengthDF <- readRDS(file = rds_path)
+}
+
+# plotting the max ent scores
+p_splicesite_strength1 <- spliceSiteStrengthDF %>%
+    ggplot(., aes(x=A5SS, y=strength)) +
+        ggrastr::rasterise(geom_quasirandom(color="darkgrey"), dpi=300) +
+        geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+        facet_wrap(~set, ncol=2) +
+        coord_cartesian(ylim=c(-35,15)) +
+        ggpubr::stat_compare_means(label.y = 14, size=3) +
+        labs(y="Splice site strength") +
+        theme(aspect.ratio = 1.5/1,
+              axis.text.x = element_text(angle=45, hjust = 1, vjust=1))
+p_splicesite_strength1
+```
+
+
+
+
+## HeLa & RPE1 Overlap 
+
+Comparison of regulated events between the HeLa and the RPE dataset. 
+Diagram 1 shows the regulated 5'SS that are down regulated in the knockout
+Diagram 2 shows similarly these  events but also taking into account wether the crypic splicesite is the same
+
+```{r}
+# read in regulated a5ss events
+HeLa <- readRDS("./data/rds_objects/HeLa_regulated_a5ss_events.rds")
+RPE <- readRDS("./data/rds_objects/RPE_regulated_a5ss_events.rds")
+
+
+# finding the canonic junctions
+HeLa_match <- filter(HeLa,annotated=="annotated",regulation=="down") 
+RPE_match <- filter(RPE,annotated=="annotated",regulation=="down")
+
+# getting splice coordinates 
+HeLa_canonic_5SS <- HeLa_match$junction_splice_position_changing
+RPE_canonic_5SS <- RPE_match$junction_splice_position_changing
+
+# pairs of splice coorddinate and the cryptiv coordinate
+HeLa_canonic_and_alternative <- paste(HeLa_match$junction_splice_position_changing, HeLa_match$alternative_splice_site, sep = "-")
+RPE_canonic_and_alternative <- paste(RPE_match$junction_splice_position_changing, RPE_match$alternative_splice_site, sep = "-")
+
+# venn diagram of overlapping splice sites that are down regulated
+venn_1 <- list(
+  HeLa = HeLa_canonic_5SS, 
+  RPE1 = RPE_canonic_5SS
+  )
+
+ggvenn(venn_1)
+
+# venn diagram of pairs were both the canonic and cryptic splice site were the same across both datasets 
+venn_2 <- list(
+  HeLa = HeLa_canonic_and_alternative, 
+  RPE1 = RPE_canonic_and_alternative
+  )
+ggvenn(venn_2)
+```
+
+## Mouse
+
+Regulated Splice Events in the HeLa datset. Regulation criteriea is explained in the methods part of the paper.
+
+```{r reading in modulize output,warning=FALSE, message=FALSE}
+
+# reading in modulize output
+ASeventList <- loadTSVs("./data/modulize/GSE213633")
+
+# getting the amount of events for each type
+eventFrequencies <- lapply(ASeventList, function(df){df$event_id %>% unique %>% length})
+
+eventFrequencies <- eventFrequencies %>%
+  as.data.frame()  %>%
+  pivot_longer(., cols=everything(), names_to="ASevent", values_to = "Frequency")
+
+# filtering out the signifcant events
+significant_events <- identifySignificantEvents(ASeventList)
+
+# amount of events filtered
+regulatedEventFrequencies <- significant_events %>%
+    dplyr::count(eventClass, name="Frequency")
+
+# interesting event types, the other ones are put into the category "other"
+eventsOfInterest <- c("cassette", "alternative_intron", "multi_exon_spanning",
+                      "alternate_first_exon", "alternate_last_exon",
+                      "alt5prime", "alt3prime", "other")
+
+regulatedEventFrequencies <- regulatedEventFrequencies %>%
+    add_row(
+        regulatedEventFrequencies %>% filter(!eventClass %in% eventsOfInterest)  %>%
+            summarise(eventClass="other", Frequency = sum(Frequency)) %>%
+            select(eventClass, Frequency)
+) %>% filter(., eventClass %in% eventsOfInterest) %>%
+    mutate(eventClass=factor(eventClass, levels=rev(eventsOfInterest)))
+
+# building a bar plot from the data
+custom_palette <- c("#999999", "#888888", "#777777", "#666666", "#555555", "#444444", "#333333", "#222222")
+
+# building a bar plot from the data
+regulatedEventFrequencies %>%
+    mutate(eventClass=factor(eventClass)) %>%
+    arrange(eventClass) %>%
+    dplyr::rename(count="Frequency") %>%
+    ggplot(aes(x=eventClass, y=count, fill=eventClass)) +
+    geom_bar(stat="identity") +
+    scale_fill_manual(values = custom_palette) +  # Using grayscale color palette
+    labs(x = "Event Class", y = "Frequency") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+
+Annotation status of the down and up regulated junctions.
+
+```{r}
+
+# adding a colum to the data that indicates for each event wether it is regulated and if so if it is up or down regulated
+modulize_regulated <- ASeventList[[3]] %>% select(event_id, junction_name, WT_median_psi, KO_median_psi, KO.WT_median_dpsi, denovo) %>%
+  mutate(regulation = case_when((event_id %in% significant_events$event_id) & KO.WT_median_dpsi > 0 ~ "up",
+                                  (event_id %in% significant_events$event_id) & KO.WT_median_dpsi < 0 ~ "down",
+                                  ((!event_id %in% significant_events$event_id)) ~ "no")) %>% 
+    mutate(regulation=factor(regulation, levels=c("no", "down", "up")))
+
+
+# renaming and grouping the regulated events by annotation status
+current_df <- modulize_regulated  %>%
+    dplyr::filter(regulation %in% c("up", "down")) %>%
+    dplyr::rename(annotated = denovo) %>%
+    mutate(annotated=ifelse(annotated == "True", "No", "Yes")) %>% 
+    group_by(regulation) %>% 
+    summarize(Yes=sum(annotated == "Yes") / n(),
+              No=sum(annotated == "No") / n()) %>%
+    pivot_longer(cols=2:3, names_to="annotated", values_to = "fraction")
+
+# plotting the annotation/regulaiton status
+plot <-ggplot(current_df, aes(x=regulation, y=fraction, fill=annotated)) +
+    geom_col() +
+    scale_fill_manual(values=c("No" = "grey", "Yes" = "black")) +
+    labs(x="Regulation of junction in knockdown",
+         y="Fraction of junctions") +
+     theme(legend.position = "right") + ggtitle("distribution")
+  plot
+  
+```
+
+
+comparison of the max ent scan scores
+
+```{r max ent scores Mouse, warning=FALSE}
+
+# in case this code has already been run hte splice strength data frame is loaded otherwise it will be created and saved in the data folder
+rds_path <- ("./data/rds_objects/GSE213633_SSDF.rds")
+
+if (!file.exists(rds_path)) {
+  # read in regulated a5ss event granges objects
+  GSE213633_regulated <- readRDS("./data/rds_objects/GSE213633_A5SSranges.rds")
+ 
+  # read in not regulated a5ss event granges objects
+  GSE213633_not_regulated <- readRDS("./data/rds_objects/GSE213633_nonRegA5SSranges.rds")
+  
+  A5SSranges <- GSE213633_regulated
+  nonRegulatedA5SSranges <- GSE213633_not_regulated
+  
+  # procession of the granges objects
+  # regulated
+  canonicalSS <- endoapply(A5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.min(KO.WT_median_dpsi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  alternativeSS <- endoapply(A5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.max(KO.WT_median_dpsi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  # Non-regulated
+  nonRegCanonicalSS <- endoapply(nonRegulatedA5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.max(WT_median_psi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+
+  nonRegAlternativeSS <- endoapply(nonRegulatedA5SSranges, function(gr){
+  gr$exon_length <- width(gr)
+  gr %>% plyranges::slice(which.min(WT_median_psi))
+  }) %>% unlist %>% resize(., 1, fix="end")
+    
+    
+  # function to calculate the splice site strength
+  calc_splicesite_strength <- function(gr, set, A5SS){
+  strengths <- gr %>%
+        flank(., 6, start = FALSE) %>% promoters(., upstream = 3, downstream = 6) %>%
+        getSeq(Mmusculus, .) %>%
+        as.character() %>%
+        VarCon::calculateMaxEntScanScore(., 5) %>%
+        as.numeric()   
+  
+  return(
+        data.frame(
+            set,
+            A5SS,
+            strength = strengths,
+            event_id = gr$event_id,
+            exon=gr$exon,
+            splice_coordinate=start(gr)
+        )
+      )
+    
+    }
+    
+  # filtering the events   
+  eventsToKeep <- canonicalSS$event_id[canonicalSS$WT_median_psi > 0.5]
+  canonicalSS <- canonicalSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  alternativeSS <- alternativeSS %>% plyranges::filter(event_id %in% eventsToKeep)
+
+  eventsToKeep <- nonRegCanonicalSS$event_id[nonRegCanonicalSS$WT_median_psi > 0.5]
+  nonRegCanonicalSS <- nonRegCanonicalSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  nonRegAlternativeSS <- nonRegAlternativeSS %>% plyranges::filter(event_id %in% eventsToKeep)
+  
+  
+  spliceSiteStrengthDF <- rbind(
+    calc_splicesite_strength(canonicalSS, "regulated", "canonical"),
+    calc_splicesite_strength(alternativeSS, "regulated", "alternative"),
+    calc_splicesite_strength(nonRegCanonicalSS, "non-regulated", "canonical"),
+    calc_splicesite_strength(nonRegAlternativeSS, "non-regulated", "alternative")
+    )
+  saveRDS(spliceSiteStrengthDF,rds_path)
+} else {
+  # Load the dataframe from the RDS object
+  spliceSiteStrengthDF <- readRDS(file = rds_path)
+}
+
+# plotting the max ent scores
+p_splicesite_strength1 <- spliceSiteStrengthDF %>%
+    ggplot(., aes(x=A5SS, y=strength)) +
+        ggrastr::rasterise(geom_quasirandom(color="darkgrey"), dpi=300) +
+        geom_boxplot(alpha=.5, outlier.size = -1, col="black") +
+        facet_wrap(~set, ncol=2) +
+        coord_cartesian(ylim=c(-35,15)) +
+        ggpubr::stat_compare_means(label.y = 14, size=3) +
+        labs(y="Splice site strength") +
+        theme(aspect.ratio = 1.5/1,
+              axis.text.x = element_text(angle=45, hjust = 1, vjust=1))
+p_splicesite_strength1
+```
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

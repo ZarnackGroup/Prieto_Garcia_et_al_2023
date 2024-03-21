@@ -1,0 +1,290 @@
+---
+title: "Mouse"
+author: "Felix Haidle"
+output:
+  BiocStyle::html_document:
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: show
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This Mouse data set is part of the research on the effect of USP39 knockouts on splicing expression.
+
+
+# Raw Data Procession
+
+Raw Data was taken from the GEO database.
+Accession Number: GSE213633
+Link: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE213633
+
+
+
+
+## Read Mapping
+
+RNAStar has been used to align the reads to the reference genome
+the reference genome used was the GRCm39 version 33
+
+command structure for this data set:
+```{bash,eval=FALSE}
+$path/tools/STAR/bin/Linux_x86_64_static/STAR \
+--runThreadN 4 \
+--genomeDir $path/genomes/GRCm39 \
+--readFilesIn fastq/$j fastq/$k \
+--readFilesCommand zcat \
+--outSAMtype BAM SortedByCoordinate \
+--outFilterMultimapNmax 1 \
+--outFilterMismatchNmax 999 \
+--outFilterMismatchNoverLmax 0.04  \
+--outFileNamePrefix starout/$l;
+
+```
+
+
+
+## Splicing analysis
+
+"MAJIQ" was used to identify splicing events
+
+Build command:
+```{bash,eval=FALSE}
+GFF3="/share/project/zarnack/felix/genomes/gencode.vM33.annotation.gff3"
+CONFIGFILE="./majiq/majiq.config"
+BUILDDIR="./majiq/build"
+
+majiq build $GFF3 \
+-c $CONFIGFILE \
+-j $SLURM_CPUS_PER_TASK \
+-o $BUILDDIR
+```
+the config files was: 
+
+```{bash,eval=FALSE}
+[info]
+bamdirs=/share/project/zarnack/felix/GSE213633/starout
+genome=GRCm39
+strandedness=none
+[experiments]
+WT=WT1Aligned.sortedByCoord.out,WT2Aligned.sortedByCoord.out,WT3Aligned.sortedByCoord.out,WT4Aligned.sortedByCoord.out
+KO=KO1Aligned.sortedByCoord.out,KO2Aligned.sortedByCoord.out,KO3Aligned.sortedByCoord.out,KO4Aligned.sortedByCoord.out
+
+```
+
+
+
+to evaluate changings between groups "majiq deltapsi" was used
+
+```{bash,eval=FALSE}
+majiq deltapsi \
+-grp1 \
+"${BUILDDIR}/WT1Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/WT2Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/WT3Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/WT4Aligned.sortedByCoord.out.majiq" \
+-grp2 \
+"${BUILDDIR}/KO1Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/KO2Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/KO3Aligned.sortedByCoord.out.majiq" \
+"${BUILDDIR}/KO4Aligned.sortedByCoord.out.majiq" \
+-j $SLURM_CPUS_PER_TASK \
+--output-type voila \
+-o $DELTAPSIDIR \
+-n WT KO 
+```
+
+
+
+
+to identify specific event types modulize was used
+```{bash,eval=FALSE}
+MODULIZEDIR="./majiq/modulize"
+SPLICEGRAPH="./majiq/build/splicegraph.sql"
+VOILAFILES="./majiq/deltapsi/WT-KO.deltapsi.voila"
+
+voila modulize \
+--changing-between-group-dpsi 0.05 \
+--non-changing-between-group-dpsi 0.02 \
+--changing-between-group-dpsi-secondary 0.025 \
+--probability-changing-threshold 0.9 \
+--probability-non-changing-threshold 0.5 \
+--show-all \
+-j $SLURM_CPUS_PER_TASK \
+-d $MODULIZEDIR \
+$SPLICEGRAPH $VOILAFILES
+
+```
+
+
+
+
+# DESeq2 Analysis
+
+
+## featureCounts
+featureCounts was used to determine the genexpression of each sample
+```{bash,eval=FALSE}
+featureCounts \
+-T 4 \
+-t exon \
+-s 0 \
+-g gene_id \
+-p \
+-a /share/project/zarnack/felix/genomes/gencode.vM33.annotation.gtf \
+-o counts.txt \
+/share/project/zarnack/felix/USP39/GSE213633/starout/*.bam
+```
+
+## Libraries
+```{r libraries, warning=FALSE,message=FALSE,echo=TRUE}
+library(DESeq2)
+library(data.table)
+library(dplyr)
+library(openxlsx)
+```
+
+
+
+## Calculations
+feature counts was used to determine the gene expression of each sample
+
+
+
+```{r deseq2,warning=FALSE}
+
+rds_path_dds <- ("./data/rds_objects/GSE213633_dds.rds")
+if (!file.exists(rds_path_dds)) {
+  # read in the featureCounts output
+  feature_counts <- fread("./data/feature_counts/GSE213633_counts.txt", header = TRUE, skip = 1)
+  
+  # extract the count columns
+  sample_columns <- grepl(".bam",colnames(feature_counts))
+  counts <- feature_counts[, ..sample_columns]
+  
+  counts <- as.data.frame(counts)
+  
+  # renaming columns to remove the path and file ending
+  column_names <- tools::file_path_sans_ext(basename(colnames(counts)))
+  # removing the Aligned.sortedByCoord.out file ending to improve readability
+  new_column_names <- gsub("Aligned.sortedByCoord.out", "", column_names)
+  colnames(counts) <- new_column_names
+  
+  
+  # renaming rows to be the gene id
+  rownames(counts) <- as.character(feature_counts$Geneid)
+  
+  
+  # creating vector for sample numbering
+  replicate_numbers <- rep(1:(ncol(counts)/2), length.out =ncol(counts))
+  
+  # creating condition vector 
+  # !!!warning!!! needs to be adjustet for different datasets, depending on how the samples are arranged in the counts.txt
+  condition_vector<- rep(c("ko", "wt"), each = ncol(counts)/2)
+  
+  
+  
+  matrix_counts <- as.matrix(counts)
+  
+  
+  
+  
+  
+  
+  # sample info dataframe
+  sample_info <- data.frame(sampleName = c(colnames(matrix_counts)),
+                            condition = condition_vector,
+                            replicate = replicate_numbers
+                            )
+  
+  
+  # creating dds object
+  dds <- DESeqDataSetFromMatrix(countData = matrix_counts, colData = sample_info, design = ~condition, tidy = FALSE)
+  
+  # adding gene names to the dds rows
+  rownames(dds) <- feature_counts$Geneid
+  
+  # releveling dds object
+  dds$condition = relevel(dds$condition,ref = "wt")
+  
+  
+  
+  # DESeq analysis
+  dds <- DESeq(dds)
+  
+  
+  saveRDS(dds,rds_path_dds)
+} else {
+  # Load the dataframe from the RDS object
+  dds <- readRDS(file = rds_path_dds)
+}
+
+sizeFactors(dds)
+
+
+# setting an alpha value
+alpha_value <- 0.05
+
+
+rld <- rlog(dds, blind = FALSE)
+
+resultsDds <- results(dds, contrast = c("condition","ko","wt"), alpha = alpha_value)
+
+
+# adding shrunken log2FoldChange values
+# calculating shrunken values
+results_shrink <- lfcShrink(dds=dds, res= resultsDds, coef=2, type = "ashr")
+resultsDds$log2FoldChange_shrink <- results_shrink$log2FoldChange
+
+
+# turn resultsobject into a dataframe for export
+results_dataframe <- as.data.frame(resultsDds)
+
+
+
+# results datframe + counts counts(dds, normalised=T) + assay(rld)
+
+
+
+# renaming the extra dataframe columns
+# for the normalized counts
+counts_dds_normalized <- counts(dds, normalized=TRUE) 
+current_names <- colnames(counts_dds_normalized)
+new_names <- paste0(current_names, "_normalized_counts")
+colnames(counts_dds_normalized) <- new_names
+
+# for the log transformed counts
+counts_dds_log_transformed <- assay(rld) 
+current_names <- colnames(counts_dds_log_transformed)
+new_names <- paste0(current_names, "_log_transformed_counts")
+colnames(counts_dds_log_transformed) <- new_names
+
+
+
+# combining the different counts in one dataframe
+big_results_table <- cbind(results_dataframe,
+                           counts_dds_log_transformed,
+                           counts_dds_normalized)
+
+
+# output of the data to an excel sheet
+
+# name of the output file
+excel_file <- "data/DESeq2_results/Zebrafish_deseq2.xlsx"
+
+# Write the dataframe to an Excel file
+write.xlsx(big_results_table, excel_file, sheetName = "Sheet1", rowNames = TRUE)
+```
+
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```

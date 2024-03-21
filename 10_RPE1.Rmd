@@ -1,0 +1,299 @@
+---
+title: "RPE1"
+author: "Felix Haidle"
+output:
+  BiocStyle::html_document:
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+
+This RPE data set is part of the research on the effect of USP39 knockouts on splicing expression.
+
+
+
+# Raw Data Procession
+
+Raw data was deposited in the GEO database with the accession number:
+
+
+
+## Read Mapping
+
+RNAStar has been used to align the reads to the reference genome
+the reference genome used was the GRCh38 version 44 and taken from Gencode
+
+command structure for this dataset:
+```{bash,eval=FALSE}
+$path/tools/STAR/bin/Linux_x86_64_static/STAR \
+--runThreadN 4 \
+--genomeDir $path/genomes/GRCh38_v44_rl50 \
+--readFilesIn "${files[i]}" "${files[i + 1]}" \
+--readFilesCommand zcat \
+--outSAMtype BAM SortedByCoordinate \
+--outFilterMultimapNmax 1 \
+--outFilterMismatchNmax 999 \
+--outFilterMismatchNoverLmax 0.04  \
+--outFileNamePrefix starout/"${sample_name}" 
+
+```
+
+## File Merging
+
+Bam files of corresponding samples were merged using samtools merge
+
+```{bash,eval=FALSE}
+/share/project/zarnack/felix/tools/samtools/bin/samtools merge ./merged_bam_files/ctrl_1.bam ./starout/RPE_ctrl_1_1Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_1_2Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_1_3Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_1_4Aligned.sortedByCoord.out.bam
+
+
+/share/project/zarnack/felix/tools/samtools/bin/samtools merge ./merged_bam_files/ctrl_2.bam ./starout/RPE_ctrl_2_1Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_2_2Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_2_3Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_2_4Aligned.sortedByCoord.out.bam
+
+
+/share/project/zarnack/felix/tools/samtools/bin/samtools merge ./merged_bam_files/ctrl_3.bam ./starout/RPE_ctrl_3_1Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_3_2Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_3_3Aligned.sortedByCoord.out.bam ./starout/RPE_ctrl_3_4Aligned.sortedByCoord.out.bam
+
+
+/share/project/zarnack/felix/tools/samtools/bin/samtools merge ./merged_bam_files/siUSP39_1.bam ./starout/RPEsiUSP39_1_1Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_1_2Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_1_3Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_1_4Aligned.sortedByCoord.out.bam
+
+
+/share/project/zarnack/felix/tools/samtools/bin/samtools merge ./merged_bam_files/siUSP39_2.bam ./starout/RPEsiUSP39_2_1Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_2_2Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_2_3Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_2_4Aligned.sortedByCoord.out.bam
+
+
+/share/project/zarnack/felix/tools/samtools/bin/samtools merge ./merged_bam_files/siUSP39_3.bam ./starout/RPEsiUSP39_3_1Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_3_2Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_3_3Aligned.sortedByCoord.out.bam ./starout/RPEsiUSP39_3_4Aligned.sortedByCoord.out.bam
+```
+
+
+## Splicing Analysis
+
+MAJIQ was used to identify splicing events
+
+Build command:
+```{bash,eval=FALSE}
+majiq build $GFF3 \
+-c $CONFIGFILE \
+-j $SLURM_CPUS_PER_TASK \
+-o $BUILDDIR
+```
+the config files was: 
+
+```{bash,eval=FALSE}
+[info]
+bamdirs=/share/project/zarnack/felix/USP39/RPE_internal/merged_bam_files
+genome=GRCh38
+strandedness=reverse
+[experiments]
+ctrl=ctrl_1,ctrl_2,ctrl_3
+ko=siUSP39_1,siUSP39_2,siUSP39_3
+```
+
+
+
+to evaluate changings between groups "majiq deltapsi" was used
+
+```{bash,eval=FALSE}
+majiq deltapsi \
+-grp1 \
+"${BUILDDIR}/ctrl_1.majiq" \
+"${BUILDDIR}/ctrl_2.majiq" \
+"${BUILDDIR}/ctrl_3.majiq" \
+-grp2 \
+"${BUILDDIR}/siUSP39_1.majiq" \
+"${BUILDDIR}/siUSP39_2.majiq" \
+"${BUILDDIR}/siUSP39_3.majiq" \
+-j $SLURM_CPUS_PER_TASK \
+--output-type voila \
+-o $DELTAPSIDIR \
+-n CT KO 
+```
+
+
+
+
+to identify specific event types modulize was used
+```{bash,eval=FALSE}
+
+voila modulize \
+--changing-between-group-dpsi 0.05 \
+--non-changing-between-group-dpsi 0.02 \
+--changing-between-group-dpsi-secondary 0.025 \
+--probability-changing-threshold 0.9 \
+--probability-non-changing-threshold 0.5 \
+--show-all \
+-j $SLURM_CPUS_PER_TASK \
+-d $MODULIZEDIR \
+$SPLICEGRAPH $VOILAFILES
+```
+
+
+
+
+
+
+# DESeq2 Analysis
+The plots where generated using R
+
+
+## featureCounts
+featureCounts was used to determine the gene expression of each sample
+
+```{bash,eval=FALSE}
+featureCounts \
+-t exon \
+-s 2 \
+-g gene_id \
+-p \
+-a /share/project/zarnack/felix/genomes/gencode.v44.annotation.gtf \
+-o counts.txt \
+/share/project/zarnack/felix/USP39/RPE_internal/merged_bam_files/*.bam
+```
+
+
+## Libraries
+```{r libraries, warning=FALSE,message=FALSE,echo=TRUE}
+library(DESeq2)
+library(data.table)
+library(dplyr)
+library(openxlsx)
+```
+
+
+## DESeq calculations
+```{r deseq2,warning=FALSE,message=FALSE}
+
+rds_path_dds <- ("./data/rds_objects/RPE_dds.rds")
+if (!file.exists(rds_path_dds)) {
+  # read in the featureCounts output
+  feature_counts <- fread("./data/feature_counts/RPE_counts.txt", header = TRUE, skip = 1)
+  
+  # extract the count columns
+  sample_columns <- grepl(".bam",colnames(feature_counts))
+  counts <- feature_counts[, ..sample_columns]
+  
+  counts <- as.data.frame(counts)
+  
+  # renaming columns to remove the path and file ending
+  column_names <- tools::file_path_sans_ext(basename(colnames(counts)))
+  # removing the Aligned.sortedByCoord.out file ending to improve readability
+  new_column_names <- gsub("Aligned.sortedByCoord.out", "", column_names)
+  colnames(counts) <- new_column_names
+  
+  
+  # renaming rows to be the gene id
+  rownames(counts) <- as.character(feature_counts$Geneid)
+  
+  
+  # creating vector for sample numbering
+  replicate_numbers <- rep(1:(ncol(counts)/2), length.out =ncol(counts))
+  
+  # creating condition vector
+  condition_vector<- rep(c("wt", "ko"), each = ncol(counts)/2)
+  
+  
+  
+  matrix_counts <- as.matrix(counts)
+  
+  
+  
+  
+  
+  
+  # sample info dataframe
+  sample_info <- data.frame(sampleName = c(colnames(matrix_counts)),
+                            condition = condition_vector,
+                            replicate = replicate_numbers
+                            )
+  
+  
+  # creating dds object
+  dds <- DESeqDataSetFromMatrix(countData = matrix_counts, colData = sample_info, design = ~condition, tidy = FALSE)
+  
+  # adding gene names to the dds rows
+  rownames(dds) <- feature_counts$Geneid
+  
+  # releveling dds object
+  dds$condition = relevel(dds$condition,ref = "wt")
+  
+  
+  
+  # DESeq analysis
+  dds <- DESeq(dds)
+  
+  
+  saveRDS(dds,rds_path_dds)
+} else {
+  # Load the dataframe from the RDS object
+  dds <- readRDS(file = rds_path_dds)
+}
+
+sizeFactors(dds)
+
+
+# setting an alpha value
+alpha_value <- 0.05
+
+
+rld <- rlog(dds, blind = FALSE)
+
+resultsDds <- results(dds, contrast = c("condition","ko","wt"), alpha = alpha_value)
+
+
+# adding shrunken log2FoldChange values
+# calculating shrunken values
+results_shrink <- lfcShrink(dds=dds, res= resultsDds, coef=2, type = "ashr")
+resultsDds$log2FoldChange_shrink <- results_shrink$log2FoldChange
+
+
+# turn resultsobject into a dataframe for export
+results_dataframe <- as.data.frame(resultsDds)
+
+
+
+# results datframe + counts counts(dds, normalised=T) + assay(rld)
+
+
+
+# renaming the extra dataframe columns
+# for the normalized counts
+counts_dds_normalized <- counts(dds, normalized=TRUE) 
+current_names <- colnames(counts_dds_normalized)
+new_names <- paste0(current_names, "_normalized_counts")
+colnames(counts_dds_normalized) <- new_names
+
+# for the log transformed counts
+counts_dds_log_transformed <- assay(rld) 
+current_names <- colnames(counts_dds_log_transformed)
+new_names <- paste0(current_names, "_log_transformed_counts")
+colnames(counts_dds_log_transformed) <- new_names
+
+
+
+# combining the different counts in one dataframe
+big_results_table <- cbind(results_dataframe,
+                           counts_dds_log_transformed,
+                           counts_dds_normalized)
+
+
+# output of the data to an excel sheet
+
+# name of the output file
+excel_file <- "data/DESeq2_results/RPE1_deseq2.xlsx"
+
+# Write the dataframe to an Excel file
+write.xlsx(big_results_table, excel_file, sheetName = "Sheet1", rowNames = TRUE)
+```
+
+
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
