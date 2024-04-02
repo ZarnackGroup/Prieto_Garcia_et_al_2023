@@ -1,6 +1,6 @@
 # Prieto_Garcia_et_al_2023
 
-In this repository the R-Scrips and Rmarkdown reports of Prieto-Garcia et al. 2023 are provided.
+In this repository the R-Scrips and Rmarkdown reports of Prieto-Garcia et al. 2024 are provided.
 
 R-Scripts and Rmarkdown reports have to be executed in the following order:
 
@@ -16,7 +16,6 @@ These first rendered HTML-Reports can be accessed at https://mchicken1988.github
 
 
 ## figure 1 and s4 code 
-before running data folder needs to be added
 
 - 07_modulize_to_regulated_granges_rds.R
 - 08_modulize_to_unregulated_granges_rds.R
@@ -25,6 +24,6 @@ before running data folder needs to be added
 
 the commands for the splicing analysis can be found in 
 
-11_majiq_porcession.Rmd
+- 11_majiq_porcession.Rmd
 
 
