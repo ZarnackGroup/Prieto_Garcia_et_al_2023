@@ -1,0 +1,155 @@
+---
+title: "majiq_procession"
+author: "Felix Haidle"
+output:
+  BiocStyle::html_document:
+    toc: TRUE
+    toc_float: TRUE
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# FastQ Trimming
+
+Trimmomatic has been used to trim the reads of the FastQ files of the Zebrafish data set
+
+```{bash, eval=FALSE}
+java -jar \
+        Trimmomatic/dist/jar/trimmomatic-0.40-rc1.jar \
+        SE \
+        $file \
+        ./$outfile \
+        ILLUMINACLIP:Trimmomatic/adapters/TruSeq3-SE.fa:2:30:10
+```
+
+
+# Read Mapping
+RNASTAR has been used to align the reads to the reference genome.
+
+Reference genomes used:
+
+| Data Set | Genome | Version |
+| --- | --- | --- |
+| HeLa | GRCh38 | v38 |
+| RPE1 | GRCh38 | v44 |
+| Mouse | GRCm39 | M33 |
+| Zebrafish | GRCz11 | v110 |
+
+
+```{bash,eval=FALSE}
+STAR \
+--runThreadN 4 \
+--genomeDir $GENOMEDIR
+--readFilesIn $FASTQDIR
+--readFilesCommand zcat \
+--outSAMtype BAM SortedByCoordinate \
+--outFilterMultimapNmax 1 \
+--outFilterMismatchNmax 999 \
+--outFilterMismatchNoverLmax 0.04  \
+--outFileNamePrefix starout/$SAMPLENAME
+```
+
+
+# Splicing Analysis
+
+## Bash Commands
+MAJIQ v2.3 was used to identify splicing events
+
+Build command:
+```{bash,eval=FALSE}
+majiq build $GFF3 \
+-c $CONFIGFILE \
+-j $SLURM_CPUS_PER_TASK \
+-o $BUILDDIR
+```
+
+
+to evaluate changes between groups MAJIQ deltapsi was used
+
+```{bash,eval=FALSE}
+majiq deltapsi \
+-grp1 \
+$GROUP_1_FILES \
+-grp2 \
+$GROUP_2_FILES \
+-j $SLURM_CPUS_PER_TASK \
+--output-type voila \
+-o $DELTAPSIDIR \
+-n CT KO 
+```
+
+
+
+
+to identify specific event types VOILA modulize was used
+```{bash,eval=FALSE}
+
+voila modulize \
+--changing-between-group-dpsi 0.05 \
+--non-changing-between-group-dpsi 0.02 \
+--changing-between-group-dpsi-secondary 0.025 \
+--probability-changing-threshold 0.9 \
+--probability-non-changing-threshold 0.5 \
+--show-all \
+-j $SLURM_CPUS_PER_TASK \
+-d $MODULIZEDIR \
+$SPLICEGRAPH $VOILAFILES
+```
+
+## Config Files
+
+Here are the majiq.config files that are required for the MAJIQ build command
+
+
+### HeLa
+
+```{bash,eval=FALSE}
+[info]
+bamdirs=$PATH_BAM_FILES
+genome=GRCh38
+strandness=reverse
+[experiments]
+CT=H_ctrl1Aligned.sortedByCoord.out,H_ctrl2Aligned.sortedByCoord.out
+KD=H_KD39_1Aligned.sortedByCoord.out,H_KD39_2Aligned.sortedByCoord.out,H_KD39_3Aligned.sortedByCoord.out
+```
+
+### RPE1
+
+```{bash,eval=FALSE}
+[info]
+bamdirs=$PATH_BAM_FILES
+genome=GRCh38
+strandedness=reverse
+[experiments]
+ctrl=ctrl_1,ctrl_2,ctrl_3
+ko=siUSP39_1,siUSP39_2,siUSP39_3
+```
+
+### Mouse
+
+```{bash,eval=FALSE}
+[info]
+bamdirs=$PATH_BAM_FILES
+genome=GRCm39
+strandedness=none
+[experiments]
+WT=WT1Aligned.sortedByCoord.out,WT2Aligned.sortedByCoord.out,WT3Aligned.sortedByCoord.out,WT4Aligned.sortedByCoord.out
+KO=KO1Aligned.sortedByCoord.out,KO2Aligned.sortedByCoord.out,KO3Aligned.sortedByCoord.out,KO4Aligned.sortedByCoord.out
+
+```
+
+### Zebrafish
+
+```{bash,eval=FALSE}
+[info]
+bamdirs=$PATH_BAM_FILES
+genome=GRCz11
+strandedness=forward
+[experiments]
+C=trimmed_C_repA_S1_L001_R1_001Aligned.sortedByCoord.out,trimmed_C_repB_S2_L001_R1_001Aligned.sortedByCoord.out,trimmed_C_repC_S3_L001_R1_001Aligned.sortedByCoord.out,trimmed_C_repD_S4_L001_R1_001Aligned.sortedByCoord.out
+M=trimmed_M_repA_S5_L001_R1_001Aligned.sortedByCoord.out,trimmed_M_repB_S6_L001_R1_001Aligned.sortedByCoord.out,trimmed_M_repC_S7_L001_R1_001Aligned.sortedByCoord.out
+
+```
