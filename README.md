@@ -17,9 +17,9 @@ These first rendered HTML-Reports can be accessed at https://mchicken1988.github
 
 ## figure 1 and s4 code 
 
-- 07_modulize_to_regulated_granges_rds.R
+- 07_modulize_to_regulated_a5ss_rds.R
+- 09_modulize_to_regulated_granges_rds.R
 - 08_modulize_to_unregulated_granges_rds.R
-- 09_modulize_to_regulated_a5ss_rds.R
 - 10_figures_1_s4_garcia_et_al_2024
 
 the commands for the splicing analysis can be found in 
