@@ -12,18 +12,6 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# FastQ Trimming
-
-Trimmomatic has been used to trim the reads of the FastQ files of the Zebrafish data set
-
-```{bash, eval=FALSE}
-java -jar \
-        Trimmomatic/dist/jar/trimmomatic-0.40-rc1.jar \
-        SE \
-        $file \
-        ./$outfile \
-        ILLUMINACLIP:Trimmomatic/adapters/TruSeq3-SE.fa:2:30:10
-```
 
 
 # Read Mapping
@@ -31,8 +19,8 @@ RNASTAR has been used to align the reads to the reference genome.
 
 Reference genomes used:
 
-| Data Set | Genome | Version |
-| --- | --- | --- |
+| Data Set | Genome | Annotation Version |
+| :--- | :--- | :--- |
 | HeLa | GRCh38 | v38 |
 | RPE1 | GRCh38 | v44 |
 | Mouse | GRCm39 | M33 |
@@ -149,7 +137,8 @@ bamdirs=$PATH_BAM_FILES
 genome=GRCz11
 strandedness=forward
 [experiments]
-C=trimmed_C_repA_S1_L001_R1_001Aligned.sortedByCoord.out,trimmed_C_repB_S2_L001_R1_001Aligned.sortedByCoord.out,trimmed_C_repC_S3_L001_R1_001Aligned.sortedByCoord.out,trimmed_C_repD_S4_L001_R1_001Aligned.sortedByCoord.out
-M=trimmed_M_repA_S5_L001_R1_001Aligned.sortedByCoord.out,trimmed_M_repB_S6_L001_R1_001Aligned.sortedByCoord.out,trimmed_M_repC_S7_L001_R1_001Aligned.sortedByCoord.out
+gfp=gfp_repAAligned.sortedByCoord.out,gfp_repBAligned.sortedByCoord.out,gfp_repCAligned.sortedByCoord.out,gfp_repDAligned.sortedByCoord.out
+usp39=usp39_repAAligned.sortedByCoord.out,usp39_repBAligned.sortedByCoord.out,usp39_repCAligned.sortedByCoord.out,usp39_repDAligned.sortedByCoord.out
+
 
 ```
