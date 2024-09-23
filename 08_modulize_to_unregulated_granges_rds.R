@@ -1,8 +1,5 @@
-# modulize data to analyzed excel sheet
 
 #reading in functions
-
-
 source("./utility/majiq_analysis_functions.R")
 
 # libraries
@@ -15,12 +12,14 @@ library(dplyr)
 
 directories <- c(HeLa="./data/modulize/HeLa",
                  RPE= "./data/modulize/RPE",
-                 GSE213633="./data/modulize/GSE213633")
+                 GSE213633="./data/modulize/GSE213633",
+                 Zebrafish="./data/modulize/Zebrafish")
 
 
 HeLa_regulated <- readRDS("./data/rds_objects/HeLa_regulated_a5ss_events.rds")
 RPE_regulated <- readRDS("./data/rds_objects/RPE_regulated_a5ss_events.rds")
 GSE213633_regulated <- readRDS("./data/rds_objects/GSE213633_regulated_a5ss_events.rds")
+Zebrafish_regulated <- readRDS("./data/rds_objects/Zebrafish_regulated_a5ss_events.rds")
 
 
 regulated_dataset_ids <- list(
