@@ -20,6 +20,7 @@ library(dplyr)
 library(ggvenn)
 library(BSgenome.Hsapiens.UCSC.hg38)
 library(BSgenome.Mmusculus.UCSC.mm39)
+library(BSgenome.Drerio.UCSC.danRer11)  
 library(GenomicRanges)
 library(ggplot2)
 library(ggsci)
@@ -467,7 +468,7 @@ ggvenn(venn_2)
 
 Regulated Splice Events in the HeLa datset. Regulation criteriea is explained in the methods part of the paper.
 
-```{r reading in modulize output,warning=FALSE, message=FALSE}
+```{r reading in modulize output mouse,warning=FALSE, message=FALSE}
 
 # reading in modulize output
 ASeventList <- loadTSVs("./data/modulize/GSE213633")
@@ -654,7 +655,7 @@ p_splicesite_strength1
 
 annotation status analysis
 
-```{r reading in modulize output,warning=FALSE, message=FALSE}
+```{r reading in modulize output zebrafish,warning=FALSE, message=FALSE}
 
 # reading in modulize output
 ASeventList <- loadTSVs("./data/modulize/Zebrafish")
@@ -671,9 +672,9 @@ significant_events <- identifySignificantEvents(ASeventList)
 
 
 # adding a colum to the data that indicates for each event wether it is regulated and if so if it is up or down regulated
-modulize_regulated <- ASeventList[[3]] %>% select(event_id, junction_name, WT_median_psi, KO_median_psi, KO.WT_median_dpsi, denovo) %>%
-  mutate(regulation = case_when((event_id %in% significant_events$event_id) & KO.WT_median_dpsi > 0 ~ "up",
-                                  (event_id %in% significant_events$event_id) & KO.WT_median_dpsi < 0 ~ "down",
+modulize_regulated <- ASeventList[[3]] %>% select(event_id, junction_name, gfp_median_psi, usp39_median_psi, usp39.gfp_median_dpsi, denovo) %>%
+  mutate(regulation = case_when((event_id %in% significant_events$event_id) & usp39.gfp_median_dpsi > 0 ~ "up",
+                                  (event_id %in% significant_events$event_id) & usp39.gfp_median_dpsi < 0 ~ "down",
                                   ((!event_id %in% significant_events$event_id)) ~ "no")) %>% 
     mutate(regulation=factor(regulation, levels=c("no", "down", "up")))
 
@@ -700,7 +701,7 @@ plot <-ggplot(current_df, aes(x=regulation, y=fraction, fill=annotated)) +
 ```
 
 
-```{r max ent scores Mouse, warning=FALSE}
+```{r max ent scores Zebrafish, warning=FALSE}
 
 # in case this code has already been run hte splice strength data frame is loaded otherwise it will be created and saved in the data folder
 rds_path <- ("./data/rds_objects/Zebrafish_SSDF.rds")

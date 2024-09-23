@@ -13,7 +13,8 @@ Zebrafish_regulated <- readRDS("./data/rds_objects/Zebrafish_regulated_a5ss_even
 datasets_regulated <- list(
                            GSE213633=GSE213633_regulated,
                            HeLa=HeLa_regulated,
-                           RPE=RPE_regulated
+                           RPE=RPE_regulated,
+                           Zebrafish=Zebrafish_regulated
                            )
 
 for (i in 1:length(datasets_regulated)){
