@@ -131,7 +131,7 @@ plot <-ggplot(current_df, aes(x=regulation, y=fraction, fill=annotated)) +
 
 ## H
 
-comparison of the max ent scan scores
+Comparison of the max ent scan scores
 
 ```{r max ent scores HeLa, warning=FALSE}
 
@@ -324,7 +324,7 @@ plot <-ggplot(current_df, aes(x=regulation, y=fraction, fill=annotated)) +
 ```
 
 
-comparison of the max ent scan scores
+Comparison of the max ent scan scores
 
 ```{r max ent scores RPE, warning=FALSE}
 # in case this code has already been run the splice strength data frame is loaded otherwise it will be created and saved in the data folder
@@ -551,7 +551,7 @@ plot <-ggplot(current_df, aes(x=regulation, y=fraction, fill=annotated)) +
 ```
 
 
-comparison of the max ent scan scores
+Comparison of the max ent scan scores
 
 ```{r max ent scores Mouse, warning=FALSE}
 
@@ -653,7 +653,7 @@ p_splicesite_strength1
 
 ## Zebrafish
 
-annotation status analysis
+Annotation status of the down and up regulated junctions.
 
 ```{r reading in modulize output zebrafish,warning=FALSE, message=FALSE}
 
@@ -700,7 +700,7 @@ plot <-ggplot(current_df, aes(x=regulation, y=fraction, fill=annotated)) +
 
 ```
 
-
+Comparison of the max ent scan scores
 ```{r max ent scores Zebrafish, warning=FALSE}
 
 # in case this code has already been run hte splice strength data frame is loaded otherwise it will be created and saved in the data folder
